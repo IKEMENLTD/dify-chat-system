@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>運用ダッシュボード</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            min-height: 100vh;
+            color: #333;
+        }
+        
+        .dashboard {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        .dashboard-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 2rem;
+            border-radius: 16px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            margin-bottom: 2rem;
+            backdrop-filter: blur(10px);
+        }
+        
+        .dashboard-header h1 {
+            font-size: clamp(1.5rem, 5vw, 2.5rem);
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            line-height: 1.2;
+        }
+        
+        .dashboard-header p {
+            font-size: clamp(0.875rem, 2.5vw, 1.125rem);
+            opacity: 0.9;
+            font-weight: 300;
+            line-height: 1.4;
+        }
+        
+        .header-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+        
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.75rem 1rem;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 20px;
+            font-size: 0.875rem;
+            backdrop-filter: blur(10px);
+            font-weight: 500;
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #4caf50;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0% { 
+                opacity: 1; 
+                box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.7);
+            }
+            70% { 
+                opacity: 0.7; 
+                box-shadow: 0 0 0 10px rgba(76, 175, 80, 0);
+            }
+            100% { 
+                opacity: 1; 
+                box-shadow: 0 0 0 0 rgba(76, 175, 80, 0);
+            }
+        }
+        
+        .controls {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+        
+        .refresh-btn, .home-btn {
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+            white-space: nowrap;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .refresh-btn:hover, .home-btn:hover {
+            background: rgba(255, 255, 255, 0.3);
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+        }
+        
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: clamp(1rem, 2vw, 1.5rem);
+            margin-bottom: 2rem;
+        }
+        
+        .metric-card {
+            background: rgba(255, 255, 255, 0.95);
+            padding: clamp(1.25rem, 3vw, 2rem);
+            border-radius: 16px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            text-align: center;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            backdrop-filter: blur(10px);
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+            min-height: 140px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+        
+        .metric-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, #2196f3, #21cbf3);
+        }
+        
+        .metric-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 16px 48px rgba(0,0,0,0.15);
+        }
+        
+        .metric-icon {
+            font-size: clamp(1.5rem, 3vw, 2rem);
+            margin-bottom: clamp(0.5rem, 1vw, 1rem);
+            opacity: 0.8;
+        }
+        
+        .metric-value {
+            font-size: clamp(1.75rem, 4vw, 2.5rem);
+            font-weight: 800;
+            background: linear-gradient(135deg, #2196f3, #21cbf3);
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: clamp(0.25rem, 1vw, 0.5rem);
+            line-height: 1.1;
+            transition: all 0.3s ease;
+        }
+        
+        .metric-label {
+            color: #666;
+            font-size: clamp(0.75rem, 1.5vw, 0.95rem);
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            line-height: 1.3;
+        }
+        
+        .chart-container {
+            background: rgba(255, 255, 255, 0.95);
+            padding: clamp(1.25rem, 3vw, 2rem);
+            border-radius: 16px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            margin-bottom: 2rem;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .chart-container h3 {
+            margin-bottom: 1.5rem;
+            color: #333;
+            font-size: clamp(1.125rem, 2.5vw, 1.375rem);
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            line-height: 1.3;
+        }
+        
+        .chart-wrapper {
+            position: relative;
+            height: clamp(200px, 25vw, 300px);
+            width: 100%;
+        }
+        
+        .alert-item {
+            background: rgba(255, 255, 255, 0.95);
+            padding: 1.5rem;
+            border-radius: 12px;
+            margin-bottom: 1rem;
+            border-left: 4px solid #28a745;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.05);
+            backdrop-filter: blur(10px);
+            transition: all 0.3s ease;
+        }
+        
+        .alert-item:hover {
+            transform: translateX(5px);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.1);
+        }
+        
+        .alert-critical {
+            border-left-color: #dc3545;
+            background: rgba(220, 53, 69, 0.05);
+        }
+        
+        .alert-warning {
+            border-left-color: #ffc107;
+            background: rgba(255, 193, 7, 0.05);
+        }
+        
+        .alert-item strong {
+            font-size: clamp(1rem, 2.5vw, 1.1rem);
+            color: #333;
+        }
+        
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+            color: #666;
+            font-style: italic;
+        }
+        
+        .error-state {
+            background: rgba(244, 67, 54, 0.1);
+            border: 1px solid rgba(244, 67, 54, 0.3);
+            color: #d32f2f;
+            padding: 1rem;
+            border-radius: 8px;
+            text-align: center;
+        }
+        
+        /* レスポンシブデザイン */
+        @media (max-width: 1024px) {
+            .dashboard-header {
+                padding: 1.5rem;
+            }
+            
+            .metrics-grid {
+                grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+                gap: 1.25rem;
+            }
+            
+            .chart-wrapper {
+                height: clamp(180px, 22vw, 250px);
+            }
+        }
+        
+        @media (max-width: 768px) {
+            body {
+                padding: 0.75rem;
+            }
+            
+            .dashboard-header {
+                padding: 1.25rem;
+                text-align: center;
+            }
+            
+            .header-controls {
+                flex-direction: column;
+                gap: 1rem;
+                align-items: center;
+            }
+            
+            .controls {
+                order: -1;
+            }
+            
+            .metrics-grid {
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 1rem;
+            }
+            
+            .metric-card {
+                min-height: 120px;
+                padding: 1rem;
+            }
+            
+            .chart-container {
+                padding: 1.25rem;
+            }
+            
+            .chart-wrapper {
+                height: clamp(160px, 20vw, 200px);
+            }
+        }
+        
+        @media (max-width: 640px) {
+            .metrics-grid {
+                grid-template-columns: 1fr 1fr;
+                gap: 0.875rem;
+            }
+            
+            .metric-card {
+                min-height: 100px;
+                padding: 0.875rem;
+            }
+            
+            .metric-icon {
+                font-size: 1.25rem;
+                margin-bottom: 0.25rem;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            body {
+                padding: 0.5rem;
+            }
+            
+            .dashboard-header {
+                padding: 1rem;
+            }
+            
+            .metrics-grid {
+                grid-template-columns: 1fr;
+                gap: 0.75rem;
+            }
+            
+            .metric-card {
+                min-height: 90px;
+                padding: 0.75rem;
+            }
+            
+            .chart-container {
+                padding: 1rem;
+            }
+            
+            .chart-wrapper {
+                height: 150px;
+            }
+            
+            .refresh-btn, .home-btn {
+                padding: 0.5rem 1rem;
+                font-size: 0.8rem;
+            }
+        }
+        
+        /* ダークモード対応 */
+        @media (prefers-color-scheme: dark) {
+            body {
+                background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+                color: #e0e0e0;
+            }
+            
+            .metric-card,
+            .chart-container,
+            .alert-item {
+                background: rgba(255, 255, 255, 0.05);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                color: #e0e0e0;
+            }
+            
+            .metric-label {
+                color: #b0b0b0;
+            }
+            
+            .chart-container h3 {
+                color: #e0e0e0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard">
+        <div class="dashboard-header">
+            <div>
+                <h1>🔧 システム運用ダッシュボード</h1>
+                <p>リアルタイムでシステムの健全性を監視</p>
+            </div>
+            <div class="header-controls">
+                <div class="controls">
+                    <a href="/" class="home-btn">
+                        🏠 チャットに戻る
+                    </a>
+                    <button class="refresh-btn" onclick="dashboard.loadData()">
+                        🔄 更新
+                    </button>
+                </div>
+                <div class="status-indicator">
+                    <div class="status-dot"></div>
+                    <span id="status-text">オンライン</span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <div class="metric-icon">💬</div>
+                <div class="metric-value" id="totalConversations">-</div>
+                <div class="metric-label">総会話数</div>
+            </div>
+            
+            <div class="metric-card">
+                <div class="metric-icon">👥</div>
+                <div class="metric-value" id="uniqueUsers">-</div>
+                <div class="metric-label">ユーザー数</div>
+            </div>
+            
+            <div class="metric-card">
+                <div class="metric-icon">⏱️</div>
+                <div class="metric-value" id="avgResponseTime">-</div>
+                <div class="metric-label">平均応答時間</div>
+            </div>
+            
+            <div class="metric-card">
+                <div class="metric-icon">😊</div>
+                <div class="metric-value" id="satisfactionRate">-</div>
+                <div class="metric-label">満足度</div>
+            </div>
+        </div>
+        
+        <div class="chart-container">
+            <h3>📈 日別会話数トレンド</h3>
+            <div class="chart-wrapper">
+                <canvas id="dailyChart"></canvas>
+            </div>
+        </div>
+        
+        <div class="chart-container">
+            <h3>⏰ 時間別利用状況</h3>
+            <div class="chart-wrapper">
+                <canvas id="hourlyChart"></canvas>
+            </div>
+        </div>
+        
+        <div class="chart-container">
+            <h3>🚨 システムステータス</h3>
+            <div id="alerts">
+                <div class="loading">データを読み込み中...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class Dashboard {
+            constructor() {
+                this.apiBaseUrl = window.location.origin;
+                
+                if (typeof Chart === 'undefined') {
+                    console.error('Chart.js が読み込まれていません');
+                    this.showError('Chart.js読み込みエラー');
+                    return;
+                }
+                
+                this.initCharts();
+                this.loadData();
+                
+                // 30秒ごとに更新
+                setInterval(() => {
+                    this.loadData();
+                }, 30000);
+            }
+            
+            initCharts() {
+                const getFontSize = () => Math.min(Math.max(10, window.innerWidth * 0.025), 14);
+                
+                // 日別会話数チャート
+                const dailyCtx = document.getElementById('dailyChart').getContext('2d');
+                this.dailyChart = new Chart(dailyCtx, {
+                    type: 'line',
+                    data: {
+                        labels: [],
+                        datasets: [{
+                            label: '会話数',
+                            data: [],
+                            borderColor: '#2196f3',
+                            backgroundColor: 'rgba(33, 150, 243, 0.1)',
+                            tension: 0.4,
+                            fill: true,
+                            borderWidth: 3,
+                            pointBackgroundColor: '#2196f3',
+                            pointBorderColor: '#fff',
+                            pointBorderWidth: 2,
+                            pointRadius: 5
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                display: false
+                            }
+                        },
+                        scales: {
+                            x: {
+                                grid: {
+                                    color: 'rgba(0,0,0,0.05)'
+                                },
+                                ticks: {
+                                    color: '#666',
+                                    font: {
+                                        size: getFontSize()
+                                    }
+                                }
+                            },
+                            y: {
+                                beginAtZero: true,
+                                grid: {
+                                    color: 'rgba(0,0,0,0.05)'
+                                },
+                                ticks: {
+                                    color: '#666',
+                                    font: {
+                                        size: getFontSize()
+                                    }
+                                }
+                            }
+                        },
+                        interaction: {
+                            intersect: false,
+                            mode: 'index'
+                        }
+                    }
+                });
+                
+                // 時間別利用状況チャート
+                const hourlyCtx = document.getElementById('hourlyChart').getContext('2d');
+                this.hourlyChart = new Chart(hourlyCtx, {
+                    type: 'bar',
+                    data: {
+                        labels: [],
+                        datasets: [{
+                            label: '会話数',
+                            data: [],
+                            backgroundColor: 'rgba(76, 175, 80, 0.8)',
+                            borderColor: '#4caf50',
+                            borderWidth: 2,
+                            borderRadius: 8,
+                            borderSkipped: false
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                display: false
+                            }
+                        },
+                        scales: {
+                            x: {
+                                grid: {
+                                    color: 'rgba(0,0,0,0.05)'
+                                },
+                                ticks: {
+                                    color: '#666',
+                                    font: {
+                                        size: getFontSize()
+                                    }
+                                }
+                            },
+                            y: {
+                                beginAtZero: true,
+                                grid: {
+                                    color: 'rgba(0,0,0,0.05)'
+                                },
+                                ticks: {
+                                    color: '#666',
+                                    font: {
+                                        size: getFontSize()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            
+            async loadData() {
+                try {
+                    this.updateStatus('読み込み中', true);
+                    
+                    // 統計データを取得
+                    const response = await fetch(`${this.apiBaseUrl}/api/stats`);
+                    
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+                    
+                    const data = await response.json();
+                    this.updateMetrics(data.basic_stats);
+                    this.updateCharts(data);
+                    this.updateAlerts(data);
+                    this.updateStatus('オンライン', true);
+                    
+                } catch (error) {
+                    console.error('データ読み込みエラー:', error);
+                    this.updateStatus('エラー', false);
+                    this.showError('データの読み込みに失敗しました。');
+                }
+            }
+            
+            updateMetrics(stats) {
+                // 基本統計の更新
+                this.animateValue('totalConversations', stats.total_conversations || 0);
+                this.animateValue('uniqueUsers', stats.unique_users || 0);
+                
+                const avgTime = stats.avg_response_time ? `${stats.avg_response_time}ms` : '-';
+                this.animateValue('avgResponseTime', avgTime);
+                
+                const satisfaction = stats.satisfaction_rate ? `${stats.satisfaction_rate}%` : '-';
+                this.animateValue('satisfactionRate', satisfaction);
+            }
+            
+            updateCharts(data) {
+                // 日別統計チャート更新
+                const dailyLabels = data.daily_stats.map(item => {
+                    const date = new Date(item.date);
+                    return date.toLocaleDateString('ja-JP', { month: 'short', day: 'numeric' });
+                }).reverse();
+                
+                const dailyData = data.daily_stats.map(item => item.conversations).reverse();
+                
+                this.dailyChart.data.labels = dailyLabels;
+                this.dailyChart.data.datasets[0].data = dailyData;
+                this.dailyChart.update('smooth');
+                
+                // 時間別統計チャート更新
+                const hourlyLabels = [];
+                const hourlyData = [];
+                
+                // 24時間のデータを準備
+                for (let i = 0; i < 24; i++) {
+                    hourlyLabels.push(`${i}:00`);
+                    const hourData = data.hourly_stats.find(item => item.hour === i);
+                    hourlyData.push(hourData ? hourData.conversations : 0);
+                }
+                
+                this.hourlyChart.data.labels = hourlyLabels;
+                this.hourlyChart.data.datasets[0].data = hourlyData;
+                this.hourlyChart.update('smooth');
+            }
+            
+            updateAlerts(data) {
+                const alertsContainer = document.getElementById('alerts');
+                const stats = data.basic_stats;
+                
+                let alertsHtml = '';
+                
+                // システム正常性チェック
+                if (stats.total_conversations > 0) {
+                    alertsHtml += `
+                        <div class="alert-item">
+                            <strong>✅ システム正常稼働中</strong><br>
+                            <span style="color: #666; font-size: 0.9rem;">
+                                過去30日間で${stats.total_conversations}件の会話を処理しました。
+                                最終更新: ${new Date().toLocaleTimeString('ja-JP')}
+                            </span>
+                        </div>
+                    `;
+                } else {
+                    alertsHtml += `
+                        <div class="alert-item alert-warning">
+                            <strong>⚠️ データが不足しています</strong><br>
+                            <span style="color: #666; font-size: 0.9rem;">
+                                まだ会話データがありません。チャットを開始してください。
+                            </span>
+                        </div>
+                    `;
+                }
+                
+                // 応答時間チェック
+                if (stats.avg_response_time && stats.avg_response_time > 5000) {
+                    alertsHtml += `
+                        <div class="alert-item alert-warning">
+                            <strong>⚠️ 応答時間が長くなっています</strong><br>
+                            <span style="color: #666; font-size: 0.9rem;">
+                                平均応答時間: ${stats.avg_response_time}ms（推奨: 3000ms以下）
+                            </span>
+                        </div>
+                    `;
+                }
+                
+                // 満足度チェック
+                if (stats.satisfaction_rate && stats.satisfaction_rate < 70) {
+                    alertsHtml += `
+                        <div class="alert-item alert-critical">
+                            <strong>🚨 満足度が低下しています</strong><br>
+                            <span style="color: #666; font-size: 0.9rem;">
+                                現在の満足度: ${stats.satisfaction_rate}%（目標: 80%以上）
+                            </span>
+                        </div>
+                    `;
+                }
+                
+                alertsContainer.innerHTML = alertsHtml;
+            }
+            
+            animateValue(elementId, newValue) {
+                const element = document.getElementById(elementId);
+                if (element) {
+                    element.style.transform = 'scale(1.1)';
+                    setTimeout(() => {
+                        element.textContent = newValue;
+                        element.style.transform = 'scale(1)';
+                    }, 150);
+                }
+            }
+            
+            updateStatus(text, isOnline) {
+                const statusText = document.getElementById('status-text');
+                const statusDot = document.querySelector('.status-dot');
+                
+                if (statusText && statusDot) {
+                    statusText.textContent = text;
+                    statusDot.style.background = isOnline ? '#4caf50' : '#f44336';
+                    
+                    if (!isOnline) {
+                        statusDot.style.animation = 'none';
+                    } else {
+                        statusDot.style.animation = 'pulse 2s infinite';
+                    }
+                }
+            }
+            
+            showError(message) {
+                const alertsContainer = document.getElementById('alerts');
+                alertsContainer.innerHTML = `
+                    <div class="error-state">
+                        <strong>⚠️ ${message}</strong><br>
+                        <small>しばらく経ってから再試行してください。</small>
+                    </div>
+                `;
+            }
+        }
+        
+        // グローバル変数として dashboard を定義
+        let dashboard;
+        
+        // ダッシュボード初期化
+        document.addEventListener('DOMContentLoaded', () => {
+            if (typeof Chart !== 'undefined') {
+                window.dashboard = new Dashboard();
+            } else {
+                setTimeout(() => {
+                    if (typeof Chart !== 'undefined') {
+                        window.dashboard = new Dashboard();
+                    } else {
+                        console.error('Chart.js could not be loaded');
+                        const statusText = document.getElementById('status-text');
+                        if (statusText) {
+                            statusText.textContent = 'ライブラリ読み込みエラー';
+                        }
+                    }
+                }, 1000);
+            }
+        });
+        
+        // エラーハンドリング
+        window.addEventListener('error', (e) => {
+            console.error('Global error:', e.error);
+            const statusText = document.getElementById('status-text');
+            if (statusText) {
+                statusText.textContent = 'エラー発生';
+            }
+        });
+        
+        // リサイズ時のチャート更新
+        window.addEventListener('resize', () => {
+            if (window.dashboard && window.dashboard.dailyChart) {
+                window.dashboard.dailyChart.resize();
+            }
+            if (window.dashboard && window.dashboard.hourlyChart) {
+                window.dashboard.hourlyChart.resize();
+            }
+        });
+    </script>
+</body>
+</html>
