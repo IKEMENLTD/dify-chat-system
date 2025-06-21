@@ -76,17 +76,16 @@ def get_db_connection():
         return None
 
 def call_dify_api(message, user_id, conversation_id=None):
-    """Dify APIを呼び出す"""
+    """Dify APIを呼び出す - 修正版"""
     headers = {
         'Authorization': f'Bearer {DIFY_API_KEY}',
         'Content-Type': 'application/json'
     }
     
+    # 🔧 修正: 正しいDify API形式
     payload = {
-        'inputs': {
-            'query': message,
-            'user_id': user_id
-        },
+        'inputs': {},
+        'query': message,
         'response_mode': 'blocking',
         'user': user_id
     }
@@ -96,6 +95,10 @@ def call_dify_api(message, user_id, conversation_id=None):
     
     try:
         start_time = datetime.now()
+        
+        # デバッグログ
+        logger.info(f"Calling Dify API with payload: {json.dumps(payload, ensure_ascii=False)}")
+        
         response = requests.post(
             f'{DIFY_API_URL}/chat-messages',
             headers=headers,
@@ -104,9 +107,14 @@ def call_dify_api(message, user_id, conversation_id=None):
         )
         end_time = datetime.now()
         
+        # レスポンスログ
+        logger.info(f"Dify API response status: {response.status_code}")
+        
         if response.status_code == 200:
             result = response.json()
             response_time = int((end_time - start_time).total_seconds() * 1000)
+            
+            logger.info(f"Dify API success: response_time={response_time}ms")
             
             return {
                 'success': True,
@@ -116,11 +124,12 @@ def call_dify_api(message, user_id, conversation_id=None):
                 'tokens_used': result.get('metadata', {}).get('usage', {}).get('total_tokens', 0)
             }
         else:
-            logger.error(f"Dify API error: {response.status_code} - {response.text}")
+            error_text = response.text
+            logger.error(f"Dify API error: {response.status_code} - {error_text}")
             return {
                 'success': False,
                 'error': f'API Error: {response.status_code}',
-                'details': response.text[:200]
+                'details': error_text[:200]
             }
             
     except requests.exceptions.Timeout:
