@@ -12,6 +12,9 @@ import time
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, FollowEvent
+import base64
+import uuid
+from supabase import create_client, Client
 
 # ログ設定
 logging.basicConfig(
@@ -30,6 +33,15 @@ CORS(app, origins=allowed_origins)
 DATABASE_URL = os.getenv('DATABASE_URL')
 DIFY_API_KEY = os.getenv('DIFY_API_KEY')
 DIFY_API_URL = os.getenv('DIFY_API_URL', 'https://api.dify.ai/v1')
+
+
+# Supabase 設定
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_BUCKET_NAME = os.getenv("SUPABASE_BUCKET_NAME")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 
 # LINE Bot 設定
 LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
