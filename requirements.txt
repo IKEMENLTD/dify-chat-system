@@ -25,3 +25,6 @@ idna==3.6
 
 # for LINE Bot integration
 line-bot-sdk==3.9.0
+
+
+supabase==2.5.0
