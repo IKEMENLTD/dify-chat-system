@@ -24,4 +24,4 @@ charset-normalizer==3.3.2
 idna==3.6
 
 # for LINE Bot integration
-+ line-bot-sdk==3.9.0
+line-bot-sdk==3.9.0
