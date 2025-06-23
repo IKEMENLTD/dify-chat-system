@@ -9,6 +9,9 @@ from psycopg2.extras import RealDictCursor
 import logging
 from functools import wraps
 import time
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, FollowEvent
 
 # ログ設定
 logging.basicConfig(
@@ -27,6 +30,24 @@ CORS(app, origins=allowed_origins)
 DATABASE_URL = os.getenv('DATABASE_URL')
 DIFY_API_KEY = os.getenv('DIFY_API_KEY')
 DIFY_API_URL = os.getenv('DIFY_API_URL', 'https://api.dify.ai/v1')
+
+# LINE Bot 設定
+LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
+
+# Chatwork Webhook 設定
+CHATWORK_WEBHOOK_TOKEN = os.getenv('CHATWORK_WEBHOOK_TOKEN')
+
+# LINE APIインスタンス生成
+if LINE_CHANNEL_SECRET and LINE_CHANNEL_ACCESS_TOKEN:
+    line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+    handler = WebhookHandler(LINE_CHANNEL_SECRET)
+    logger.info("LINE Bot SDK initialized.")
+else:
+    line_bot_api = None
+    handler = None
+    logger.warning("LINE Bot credentials not set. LINE integration will be disabled.")
+
 
 # 必須環境変数チェック
 if not DATABASE_URL or not DIFY_API_KEY:
@@ -527,6 +548,134 @@ def not_found(error):
 def internal_error(error):
     logger.error(f"Internal server error: {error}")
     return jsonify({'error': 'Internal server error'}), 500
+
+# =================================================================
+# == 外部連携 Webhook エンドポイント
+# =================================================================
+
+def save_external_log(platform, source_id, user_id, user_name, message, raw_data):
+    """外部サービスのチャットログをDBに保存する共通関数"""
+    conn = get_db_connection()
+    if not conn:
+        logger.error(f"[{platform}] Failed to connect to DB for saving log.")
+        return
+
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO external_chat_logs
+            (platform, source_id, user_id, user_name, message, raw_data, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (
+            platform,
+            source_id,
+            user_id,
+            user_name,
+            message,
+            json.dumps(raw_data), # JSONB型にはJSON文字列として保存
+            datetime.now()
+        ))
+        conn.commit()
+        logger.info(f"[{platform}] Log saved from source: {source_id}")
+    except Exception as e:
+        logger.error(f"[{platform}] Database save error: {e}")
+        conn.rollback()
+    finally:
+        cur.close()
+        conn.close()
+
+# --- LINE Webhook ---
+@app.route("/api/line/webhook", methods=['POST'])
+def line_webhook():
+    """LINE Messaging APIからのWebhookを受け取るエンドポイント"""
+    if not handler:
+        logger.warning("LINE handler not initialized. Skipping webhook.")
+        return 'OK'
+
+    # リクエストヘッダーから署名を取得
+    signature = request.headers.get('X-Line-Signature')
+    if not signature:
+        abort(400)
+
+    # リクエストボディを取得
+    body = request.get_data(as_text=True)
+    logger.info(f"LINE Webhook request body: {body}")
+
+    # 署名を検証し、イベントを処理
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        logger.error("Invalid LINE signature. Check your channel secret.")
+        abort(400)
+    except Exception as e:
+        logger.error(f"Error handling LINE webhook: {e}")
+        abort(500)
+
+    return 'OK'
+
+@handler.add(MessageEvent, message=TextMessage)
+def handle_line_message(event):
+    """LINEのテキストメッセージイベントを処理"""
+    try:
+        source_id = event.source.group_id or event.source.room_id or event.source.user_id
+        user_id = event.source.user_id
+        
+        # ユーザープロファイルを取得して名前を取得
+        try:
+            profile = line_bot_api.get_profile(user_id)
+            user_name = profile.display_name
+        except Exception:
+            user_name = "Unknown User"
+
+        message_text = event.message.text
+        raw_data = json.loads(str(event))
+
+        save_external_log('line', source_id, user_id, user_name, message_text, raw_data)
+
+    except Exception as e:
+        logger.error(f"Error in handle_line_message: {e}")
+
+@handler.add(FollowEvent)
+def handle_follow(event):
+    """Botが友だち追加されたときのイベント"""
+    logger.info(f"Followed by user: {event.source.user_id}")
+    # 必要であればここで挨拶メッセージなどを送る
+    # line_bot_api.reply_message(event.reply_token, TextSendMessage(text='友だち追加ありがとうございます！'))
+
+
+# --- Chatwork Webhook ---
+@app.route("/api/chatwork/webhook", methods=['POST'])
+def chatwork_webhook():
+    """ChatworkからのWebhookを受け取るエンドポイント"""
+    # 独自のトークンでリクエストを検証
+    req_token = request.headers.get('X-Chatworkwebhooktoken') # Chatworkはヘッダー名を小文字にする
+    if not req_token or req_token != CHATWORK_WEBHOOK_TOKEN:
+        logger.warning("Invalid Chatwork webhook token.")
+        abort(403)
+
+    data = request.json
+    logger.info(f"Chatwork Webhook request data: {json.dumps(data)}")
+
+    try:
+        event_type = data.get('webhook_event_type')
+        if event_type == 'message_created':
+            event_body = data.get('webhook_event', {})
+            source_id = str(event_body.get('room_id'))
+            user_id = str(event_body.get('from_account_id'))
+            
+            # Chatwork APIを叩いてユーザー名を取得する（別途実装が必要）
+            # ここでは簡単化のためアカウントIDを名前として使用
+            user_name = f"CW User {user_id}" 
+            
+            message_text = event_body.get('body')
+            
+            save_external_log('chatwork', source_id, user_id, user_name, message_text, data)
+
+    except Exception as e:
+        logger.error(f"Error processing Chatwork webhook: {e}")
+
+    return 'OK'
+
 
 if __name__ == '__main__':
     print("🚀 Dify Chat API Server Starting...")
