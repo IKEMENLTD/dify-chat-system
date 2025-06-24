@@ -780,6 +780,25 @@
                 display: none;
             }
         }
+
+
+        .search-result {
+            border-left: 3px solid #ddd;
+            padding-left: 10px;
+            margin-top: 8px;
+            font-size: 0.9em;
+        }
+        .search-result-header {
+            font-weight: bold;
+            color: #555;
+            font-size: 0.8em;
+        }
+        .search-result-message {
+            margin-top: 4px;
+        }
+        .search-result-message a {
+            color: var(--primary-blue);
+        }
     </style>
 </head>
 <body>
@@ -801,17 +820,17 @@
             <div class="messages-container" id="messages">
                 <div class="welcome-message">
                     <h3>👋 ようこそ！</h3>
-                    <p>私はベテランAIです。技術的な質問、コードレビュー、アーキテクチャ設計など、開発に関することなら何でもお聞かせください。画像、動画、PDFファイルもアップロードできます。</p>
+                    <p>私はベテランAIです。質問への回答のほか、<code>/search キーワード</code> と入力すると、過去のログから情報を検索できます。</p>
                 </div>
                 
                 <div class="message ai">
                     <div class="message-avatar">AI</div>
                     <div class="message-content">
                         <div class="message-text">
-                            こんにちは！何かお手伝いできることはありますか？<br>
-                            プログラミング、システム設計、技術選定など、お気軽にご相談ください。<br>
-                            📎 ファイルアップロード機能も利用できます！
+                               こんにちは！何かお手伝いできることはありますか？<br>
+                                 データベース内の情報を検索したい場合は、<code>/search 検索したい言葉</code> の形式で入力してください。
                         </div>
+
                         <div class="message-time" id="initial-time"></div>
                     </div>
                 </div>
@@ -1066,59 +1085,116 @@
             async sendMessage() {
                 const message = this.messageInput.value.trim();
                 
-                // メッセージとファイルの両方が空の場合は送信しない
                 if (!message && this.uploadedFiles.length === 0) return;
                 if (this.isTyping) return;
                 
-                // 文字数制限チェック
-                if (message.length > 2000) {
-                    this.showError('メッセージは2000文字以内で入力してください。');
+                // ▼▼▼ 処理の振り分け機能を追加 ▼▼▼
+                // /search コマンドを判定
+                if (message.startsWith('/search ')) {
+                    const query = message.substring(8).trim(); // "/search "以降の文字列を取得
+                    if (query) {
+                        // 検索を実行する新しい関数を呼び出す
+                        await this.performSearch(query);
+                    } else {
+                        this.showError('検索キーワードを入力してください。例: /search IT導入補助金');
+                    }
+                } else {
+                    // 通常のチャットメッセージを送信する新しい関数を呼び出す
+                    await this.sendChatMessage(message);
+                }
+            }
+
+            
+
+            async performSearch(query) {
+                this.addMessage(`/search ${query}`, 'user');
+                this.messageInput.value = '';
+                this.autoResize();
+                this.showTypingIndicator();
+                this.isTyping = true;
+                this.sendButton.disabled = true;
+
+                try {
+                    const response = await fetch(`/api/search_all?q=${encodeURIComponent(query)}`);
+                    if (!response.ok) {
+                        const errorData = await response.json().catch(() => ({}));
+                        throw new Error(errorData.error || `HTTP ${response.status}`);
+                    }
+                    const data = await response.json();
+                    this.displaySearchResults(data.results, query);
+                } catch (error) {
+                    console.error('Search error:', error);
+                    this.showError(`検索エラー: ${error.message}`);
+                } finally {
+                    this.hideTypingIndicator();
+                    this.isTyping = false;
+                    this.sendButton.disabled = false;
+                    this.messageInput.focus();
+                }
+            }
+
+            displaySearchResults(results, query) {
+                if (results.length === 0) {
+                    this.addMessage(`「${query}」に該当する情報は見つかりませんでした。`, 'ai');
                     return;
                 }
+
+                let htmlContent = `「${query}」の検索結果が${results.length}件見つかりました。<br><br>`;
                 
-                // ユーザーメッセージ表示
+                results.forEach(res => {
+                    const date = new Date(res.created_at).toLocaleString('ja-JP');
+                    const sourceLabel = res.source === 'ai_chat' ? 'AIチャット' : res.source;
+                    
+                    const linkedMessage = res.message.replace(
+                        /(https?:\/\/[^\s"'<>`]+)/g,
+                        '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>'
+                    );
+
+                    htmlContent += `
+                        <div class="search-result">
+                            <div class="search-result-header">
+                                <strong>[${sourceLabel}]</strong> - ${date}
+                            </div>
+                            <div class="search-result-message">${linkedMessage}</div>
+                        </div>
+                        <hr style="border:0; border-top: 1px solid #eee; margin: 8px 0;">
+                    `;
+                });
+
+                this.addMessage(htmlContent, 'ai', [], true);
+            }
+
+            async sendChatMessage(message) {
+                // 元のsendMessageの処理をここに移動
                 await this.addMessage(message, 'user', this.uploadedFiles);
                 
-                // 入力をクリア
                 this.messageInput.value = '';
                 this.uploadedFiles = [];
                 this.updateFileUploadUI();
                 this.autoResize();
                 
-                // 送信ボタン無効化
-                this.sendButton.disabled = true;
                 this.isTyping = true;
+                this.sendButton.disabled = true;
                 this.showTypingIndicator();
                 
                 try {
-                    // ファイルをBase64に変換
                     const files = await Promise.all(
                         this.uploadedFiles.map(async file => ({
-                            name: file.name,
-                            type: file.type,
-                            size: file.size,
+                            name: file.name, type: file.type, size: file.size,
                             data: await this.fileToBase64(file)
                         }))
                     );
                     
-                    const controller = new AbortController();
-                    const timeoutId = setTimeout(() => controller.abort(), 30000);
-                    
                     const response = await fetch('/api/chat', {
                         method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
+                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             user_id: this.userId,
                             message: message,
                             conversation_id: this.conversationId,
                             files: files
                         }),
-                        signal: controller.signal
                     });
-                    
-                    clearTimeout(timeoutId);
                     
                     if (!response.ok) {
                         const errorData = await response.json().catch(() => ({}));
@@ -1126,46 +1202,23 @@
                     }
                     
                     const data = await response.json();
+                    if (data.conversation_id) this.conversationId = data.conversation_id;
                     
-                    // 会話IDを保存
-                    if (data.conversation_id) {
-                        this.conversationId = data.conversation_id;
-                    }
-                    
-                    // AI応答を表示
                     this.addMessage(data.response || 'すみません、応答を生成できませんでした。', 'ai');
-                    this.messageCount++;
-                    
+
                 } catch (error) {
                     console.error('Chat error:', error);
-                    
-                    let errorMessage = '申し訳ございません。一時的なエラーが発生しました。';
-                    
-                    if (error.name === 'AbortError') {
-                        errorMessage = 'リクエストがタイムアウトしました。もう一度お試しください。';
-                    } else if (error.message.includes('Failed to fetch')) {
-                        errorMessage = 'ネットワーク接続を確認してください。';
-                    } else if (error.message) {
-                        errorMessage = `エラー: ${error.message}`;
-                    }
-                    
-                    this.addMessage(errorMessage, 'ai');
+                    this.addMessage(`エラー: ${error.message}`, 'ai');
                     this.updateStatus('エラー', false);
-                    
                 } finally {
                     this.hideTypingIndicator();
                     this.sendButton.disabled = false;
                     this.isTyping = false;
                     this.messageInput.focus();
-                    
-                    // 接続状態を再確認
-                    setTimeout(() => {
-                        this.testConnection();
-                    }, 1000);
                 }
             }
             
-            async addMessage(text, sender, files = []) {
+              async addMessage(text, sender, files = [], isHtml = false) { // isHtml引数を追加
                 const messageDiv = document.createElement('div');
                 messageDiv.className = `message ${sender}`;
                 
@@ -1175,7 +1228,7 @@
                 });
                 
                 const avatarText = sender === 'user' ? 'You' : 'AI';
-                const formattedText = this.formatMessage(text);
+                const messageContentHtml = isHtml ? text : this.formatMessage(text);
                 
                 let fileAttachmentsHtml = '';
                 if (files && files.length > 0) {
