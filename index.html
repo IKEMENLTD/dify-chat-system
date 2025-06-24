@@ -3,49 +3,717 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ベテランAI</title>
+    <title>ベテランAI - 賢いチャットボット</title>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/default.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-
     <style>
-        /* ... (元のCSS) ... */
-        
-        /* ▼▼▼ Markdown表示用のCSSを追加 ▼▼▼ */
-        .message-text pre {
-            background-color: #f4f4f4;
-            padding: 1em;
-            border-radius: 8px;
-            white-space: pre-wrap;
-            word-wrap: break-word;
-            position: relative;
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
         }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            padding: 1rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .header-content {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+
+        .logo {
+            color: white;
+            font-size: 1.5rem;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .header-controls {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+
+        .dashboard-link {
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+            text-decoration: none;
+            padding: 0.5rem 1rem;
+            border-radius: 25px;
+            font-weight: 500;
+            transition: all 0.3s ease;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+        }
+
+        .dashboard-link:hover {
+            background: rgba(255, 255, 255, 0.3);
+            transform: translateY(-2px);
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: white;
+            font-size: 0.9rem;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #4ade80;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { 
+                opacity: 1; 
+                box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.7);
+            }
+            70% { 
+                opacity: 0.7; 
+                box-shadow: 0 0 0 10px rgba(74, 222, 128, 0);
+            }
+            100% { 
+                opacity: 1; 
+                box-shadow: 0 0 0 0 rgba(74, 222, 128, 0);
+            }
+        }
+
+        .status-dot.offline {
+            background: #ef4444;
+            animation: none;
+        }
+
+        .chat-container {
+            flex: 1;
+            max-width: 1200px;
+            margin: 0 auto;
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px 20px 0 0;
+            margin-top: 1rem;
+            box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.1);
+        }
+
+        .chat-header {
+            padding: 1.5rem;
+            border-bottom: 1px solid #e5e7eb;
+            background: rgba(255, 255, 255, 0.8);
+            border-radius: 20px 20px 0 0;
+        }
+
+        .chat-title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: #1f2937;
+            margin-bottom: 0.5rem;
+        }
+
+        .chat-subtitle {
+            color: #6b7280;
+            font-size: 0.95rem;
+            line-height: 1.4;
+        }
+
+        .messages-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1rem;
+            min-height: 400px;
+            max-height: 60vh;
+            scroll-behavior: smooth;
+        }
+
+        .message {
+            display: flex;
+            margin-bottom: 1.5rem;
+            animation: slideIn 0.3s ease;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .message.user {
+            justify-content: flex-end;
+        }
+
+        .message.ai {
+            justify-content: flex-start;
+        }
+
+        .message-bubble {
+            max-width: 70%;
+            padding: 1rem 1.25rem;
+            border-radius: 20px;
+            position: relative;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+
+        .message.user .message-bubble {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-bottom-right-radius: 5px;
+        }
+
+        .message.ai .message-bubble {
+            background: #f8fafc;
+            color: #1f2937;
+            border: 1px solid #e5e7eb;
+            border-bottom-left-radius: 5px;
+        }
+
+        .message-text {
+            line-height: 1.6;
+            word-wrap: break-word;
+        }
+
+        .message-text p {
+            margin-bottom: 0.75rem;
+        }
+
+        .message-text p:last-child {
+            margin-bottom: 0;
+        }
+
+        .message-text h1,
+        .message-text h2,
+        .message-text h3 {
+            margin: 1rem 0 0.5rem 0;
+            font-weight: 600;
+        }
+
+        .message-text ul,
+        .message-text ol {
+            margin: 0.5rem 0;
+            padding-left: 1.5rem;
+        }
+
+        .message-text li {
+            margin-bottom: 0.25rem;
+        }
+
+        .message-text blockquote {
+            border-left: 4px solid #d1d5db;
+            padding-left: 1rem;
+            margin: 1rem 0;
+            font-style: italic;
+            color: #6b7280;
+        }
+
+        .message-text pre {
+            background-color: #1f2937;
+            color: #f9fafb;
+            padding: 1rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            position: relative;
+            margin: 1rem 0;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.9rem;
+            line-height: 1.4;
+        }
+
         .message-text code {
             font-family: 'Courier New', Courier, monospace;
+            font-size: 0.9em;
         }
+
+        .message-text :not(pre) > code {
+            background-color: #f3f4f6;
+            color: #e11d48;
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-weight: 500;
+        }
+
         .copy-btn {
             position: absolute;
-            top: 5px;
-            right: 5px;
-            background: #ddd;
+            top: 8px;
+            right: 8px;
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
             border: none;
-            padding: 3px 6px;
+            padding: 0.25rem 0.5rem;
             border-radius: 4px;
             cursor: pointer;
-            font-size: 0.8em;
+            font-size: 0.75rem;
+            font-weight: 500;
+            transition: all 0.2s ease;
+            backdrop-filter: blur(10px);
         }
-        .copy-btn:hover { background: #ccc; }
+
+        .copy-btn:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        .typing-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: #6b7280;
+            font-style: italic;
+            padding: 0.5rem 0;
+        }
+
+        .typing-dots {
+            display: flex;
+            gap: 3px;
+        }
+
+        .typing-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #9ca3af;
+            animation: typing 1.4s infinite ease-in-out;
+        }
+
+        .typing-dot:nth-child(1) { animation-delay: -0.32s; }
+        .typing-dot:nth-child(2) { animation-delay: -0.16s; }
+
+        @keyframes typing {
+            0%, 80%, 100% {
+                transform: scale(0);
+                opacity: 0.5;
+            }
+            40% {
+                transform: scale(1);
+                opacity: 1;
+            }
+        }
+
+        .input-container {
+            padding: 1rem;
+            border-top: 1px solid #e5e7eb;
+            background: rgba(255, 255, 255, 0.8);
+        }
+
+        .input-form {
+            display: flex;
+            gap: 0.75rem;
+            align-items: flex-end;
+        }
+
+        .input-wrapper {
+            flex: 1;
+            position: relative;
+        }
+
+        .message-input {
+            width: 100%;
+            min-height: 3rem;
+            max-height: 8rem;
+            padding: 0.75rem 1rem;
+            border: 2px solid #e5e7eb;
+            border-radius: 20px;
+            font-size: 1rem;
+            font-family: inherit;
+            resize: none;
+            background: white;
+            transition: all 0.2s ease;
+            line-height: 1.5;
+        }
+
+        .message-input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .message-input::placeholder {
+            color: #9ca3af;
+        }
+
+        .send-button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            width: 3rem;
+            height: 3rem;
+            border-radius: 50%;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2rem;
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+        }
+
+        .send-button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .send-button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .example-questions {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .example-question {
+            background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 1rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-align: left;
+        }
+
+        .example-question:hover {
+            background: linear-gradient(135deg, #e2e8f0 0%, #cbd5e1 100%);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+
+        .example-question-title {
+            font-weight: 600;
+            color: #1f2937;
+            margin-bottom: 0.5rem;
+            font-size: 0.95rem;
+        }
+
+        .example-question-text {
+            color: #6b7280;
+            font-size: 0.9rem;
+            line-height: 1.4;
+        }
+
+        .welcome-message {
+            text-align: center;
+            padding: 2rem;
+            color: #6b7280;
+        }
+
+        .welcome-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: #1f2937;
+            margin-bottom: 1rem;
+        }
+
+        .welcome-subtitle {
+            font-size: 1rem;
+            line-height: 1.6;
+            margin-bottom: 2rem;
+        }
+
+        .error-message {
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            color: #dc2626;
+            padding: 1rem;
+            border-radius: 8px;
+            margin: 1rem 0;
+        }
+
+        /* レスポンシブデザイン */
+        @media (max-width: 768px) {
+            .header-content {
+                flex-direction: column;
+                text-align: center;
+            }
+
+            .chat-container {
+                margin-top: 0.5rem;
+                border-radius: 15px 15px 0 0;
+            }
+
+            .chat-header {
+                padding: 1rem;
+            }
+
+            .chat-title {
+                font-size: 1.25rem;
+            }
+
+            .messages-container {
+                max-height: 50vh;
+            }
+
+            .message-bubble {
+                max-width: 85%;
+                padding: 0.875rem 1rem;
+            }
+
+            .example-questions {
+                grid-template-columns: 1fr;
+                gap: 0.75rem;
+            }
+
+            .input-form {
+                gap: 0.5rem;
+            }
+
+            .send-button {
+                width: 2.75rem;
+                height: 2.75rem;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .header {
+                padding: 0.75rem;
+            }
+
+            .logo {
+                font-size: 1.25rem;
+            }
+
+            .chat-header {
+                padding: 0.875rem;
+            }
+
+            .messages-container {
+                padding: 0.75rem;
+                max-height: 45vh;
+            }
+
+            .message-bubble {
+                max-width: 90%;
+                padding: 0.75rem;
+            }
+
+            .message-text pre {
+                font-size: 0.8rem;
+                padding: 0.75rem;
+            }
+
+            .input-container {
+                padding: 0.75rem;
+            }
+
+            .message-input {
+                font-size: 0.95rem;
+                padding: 0.625rem 0.875rem;
+            }
+
+            .send-button {
+                width: 2.5rem;
+                height: 2.5rem;
+                font-size: 1rem;
+            }
+        }
     </style>
 </head>
 <body>
+    <header class="header">
+        <div class="header-content">
+            <div class="logo">
+                🤖 ベテランAI
+            </div>
+            <div class="header-controls">
+                <a href="/dashboard" class="dashboard-link">
+                    📊 ダッシュボード
+                </a>
+                <div class="status-indicator">
+                    <div class="status-dot" id="statusDot"></div>
+                    <span id="statusText">接続中...</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <div class="chat-container">
+        <div class="chat-header">
+            <h1 class="chat-title">過去の記憶を活用する賢いAI</h1>
+            <p class="chat-subtitle">
+                自然な言葉で質問してください。過去のやり取りから関連する情報を見つけて、より的確な回答をします。
+            </p>
+        </div>
+
+        <div class="messages-container" id="messagesContainer">
+            <div class="welcome-message">
+                <h2 class="welcome-title">👋 こんにちは！</h2>
+                <p class="welcome-subtitle">
+                    何でもお気軽にお聞きください。過去の会話から関連する情報を探して、<br>
+                    より良い回答をお提供します。
+                </p>
+                
+                <div class="example-questions">
+                    <div class="example-question" onclick="chatApp.askExample('IT導入補助金の営業資料どれだっけ？')">
+                        <div class="example-question-title">📋 資料の場所を教えて</div>
+                        <div class="example-question-text">IT導入補助金の営業資料どれだっけ？</div>
+                    </div>
+                    <div class="example-question" onclick="chatApp.askExample('前に話したプロジェクトの進捗はどう？')">
+                        <div class="example-question-title">📈 進捗確認</div>
+                        <div class="example-question-text">前に話したプロジェクトの進捗はどう？</div>
+                    </div>
+                    <div class="example-question" onclick="chatApp.askExample('あの技術的な問題、解決方法見つかった？')">
+                        <div class="example-question-title">🔧 技術サポート</div>
+                        <div class="example-question-text">あの技術的な問題、解決方法見つかった？</div>
+                    </div>
+                    <div class="example-question" onclick="chatApp.askExample('今日のミーティングで何を準備すればいい？')">
+                        <div class="example-question-title">📅 準備確認</div>
+                        <div class="example-question-text">今日のミーティングで何を準備すればいい？</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="input-container">
+            <form class="input-form" id="chatForm">
+                <div class="input-wrapper">
+                    <textarea 
+                        class="message-input" 
+                        id="messageInput" 
+                        placeholder="メッセージを入力..."
+                        rows="1"
+                    ></textarea>
+                </div>
+                <button type="submit" class="send-button" id="sendButton">
+                    ➤
+                </button>
+            </form>
+        </div>
+    </div>
+
     <script>
         class ChatApp {
-            // ... (constructorは変更なし) ...
-            
-            // ▼▼▼ ストリーミング対応のため、sendMessageを完全に書き換え ▼▼▼
+            constructor() {
+                this.messagesContainer = document.getElementById('messagesContainer');
+                this.messageInput = document.getElementById('messageInput');
+                this.sendButton = document.getElementById('sendButton');
+                this.chatForm = document.getElementById('chatForm');
+                this.statusDot = document.getElementById('statusDot');
+                this.statusText = document.getElementById('statusText');
+                
+                this.userId = this.generateUserId();
+                this.conversationId = this.generateConversationId();
+                this.isTyping = false;
+                
+                this.initializeEventListeners();
+                this.updateStatus('オンライン', true);
+                
+                // マークダウン設定
+                if (typeof marked !== 'undefined') {
+                    marked.setOptions({
+                        breaks: true,
+                        gfm: true
+                    });
+                }
+            }
+
+            generateUserId() {
+                // ローカルストレージから既存のユーザーIDを取得、なければ生成
+                let userId = localStorage.getItem('chatUserId');
+                if (!userId) {
+                    userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+                    localStorage.setItem('chatUserId', userId);
+                }
+                return userId;
+            }
+
+            generateConversationId() {
+                return 'conv_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+            }
+
+            initializeEventListeners() {
+                // フォーム送信
+                this.chatForm.addEventListener('submit', (e) => {
+                    e.preventDefault();
+                    this.sendMessage();
+                });
+
+                // テキストエリアの自動リサイズ
+                this.messageInput.addEventListener('input', () => {
+                    this.autoResize();
+                });
+
+                // Enter キーでの送信
+                this.messageInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        this.sendMessage();
+                    }
+                });
+
+                // ページ読み込み時のヘルスチェック
+                this.checkHealth();
+            }
+
+            autoResize() {
+                this.messageInput.style.height = 'auto';
+                this.messageInput.style.height = Math.min(this.messageInput.scrollHeight, 128) + 'px';
+            }
+
+            async checkHealth() {
+                try {
+                    const response = await fetch('/health');
+                    if (response.ok) {
+                        this.updateStatus('オンライン', true);
+                    } else {
+                        this.updateStatus('接続エラー', false);
+                    }
+                } catch (error) {
+                    this.updateStatus('オフライン', false);
+                }
+            }
+
+            updateStatus(text, isOnline) {
+                this.statusText.textContent = text;
+                if (isOnline) {
+                    this.statusDot.classList.remove('offline');
+                } else {
+                    this.statusDot.classList.add('offline');
+                }
+            }
+
+            askExample(exampleText) {
+                this.messageInput.value = exampleText;
+                this.autoResize();
+                this.sendMessage();
+            }
+
             async sendMessage() {
                 const message = this.messageInput.value.trim();
                 if (!message || this.isTyping) return;
+
+                // ウェルカムメッセージを隠す
+                const welcomeMessage = document.querySelector('.welcome-message');
+                if (welcomeMessage) {
+                    welcomeMessage.style.display = 'none';
+                }
 
                 this.addMessage(message, 'user');
                 this.messageInput.value = '';
@@ -60,6 +728,8 @@
                 let fullResponse = "";
 
                 try {
+                    this.updateStatus('返答中...', true);
+
                     const response = await fetch('/api/chat', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -69,6 +739,10 @@
                             conversation_id: this.conversationId,
                         }),
                     });
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
 
                     const reader = response.body.getReader();
                     const decoder = new TextDecoder();
@@ -82,70 +756,158 @@
 
                         for (const line of lines) {
                             if (line.startsWith('data: ')) {
-                                const data = JSON.parse(line.substring(6));
-                                fullResponse += data.text;
-                                // テキストを追記し、スクロール
-                                messageTextElement.innerText += data.text; 
-                                this.scrollToBottom();
+                                try {
+                                    const data = JSON.parse(line.substring(6));
+                                    
+                                    if (data.error) {
+                                        throw new Error(data.text);
+                                    }
+                                    
+                                    if (data.text) {
+                                        fullResponse += data.text;
+                                        messageTextElement.textContent = fullResponse;
+                                        this.scrollToBottom();
+                                    }
+                                    
+                                    if (data.done) {
+                                        break;
+                                    }
+                                } catch (parseError) {
+                                    console.warn('JSON parse error:', parseError);
+                                }
                             }
                         }
                     }
 
-                    // ▼▼▼ ストリーム終了後、Markdownとして描画し直す ▼▼▼
-                    messageTextElement.innerHTML = marked.parse(fullResponse);
+                    // ストリーム終了後、Markdownとして描画し直す
+                    if (typeof marked !== 'undefined') {
+                        messageTextElement.innerHTML = marked.parse(fullResponse);
+                    } else {
+                        messageTextElement.innerHTML = this.simpleMarkdown(fullResponse);
+                    }
+                    
                     this.addSyntaxHighlighting(messageTextElement);
                     this.addCopyButtons(messageTextElement);
                     this.scrollToBottom();
 
                 } catch (error) {
                     console.error('Chat error:', error);
-                    messageTextElement.innerText = `エラーが発生しました: ${error.message}`;
+                    messageTextElement.innerHTML = `
+                        <div class="error-message">
+                            <strong>⚠️ エラーが発生しました</strong><br>
+                            ${error.message}
+                        </div>
+                    `;
                 } finally {
                     this.isTyping = false;
                     this.sendButton.disabled = false;
                     this.messageInput.focus();
+                    this.updateStatus('オンライン', true);
                 }
             }
 
-            // ▼▼▼ 空のメッセージ要素を返すようにaddMessageを修正 ▼▼▼
             addMessage(text, sender, streaming = false) {
                 const messageDiv = document.createElement('div');
-                // ... (元のaddMessageのロジック) ...
-                
-                // ストリーミング中のプレースホルダーとして、または通常のメッセージとして設定
-                messageTextElement.innerHTML = streaming ? '<span class="typing-cursor"></span>' : formattedText;
+                messageDiv.className = `message ${sender}`;
 
+                const messageBubble = document.createElement('div');
+                messageBubble.className = 'message-bubble';
+
+                const messageText = document.createElement('div');
+                messageText.className = 'message-text';
+
+                if (streaming) {
+                    messageText.innerHTML = '<div class="typing-indicator"><span>AIが返答中</span><div class="typing-dots"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div></div>';
+                } else if (sender === 'ai' && typeof marked !== 'undefined') {
+                    messageText.innerHTML = marked.parse(text);
+                    this.addSyntaxHighlighting(messageText);
+                    this.addCopyButtons(messageText);
+                } else {
+                    messageText.textContent = text;
+                }
+
+                messageBubble.appendChild(messageText);
+                messageDiv.appendChild(messageBubble);
                 this.messagesContainer.appendChild(messageDiv);
+                
                 this.scrollToBottom();
-                return messageDiv; // 要素を返す
+                return messageDiv;
             }
 
-            // ▼▼▼ Markdown関連のヘルパー関数を追加 ▼▼▼
+            simpleMarkdown(text) {
+                // 簡単なMarkdown変換（markedが利用できない場合のフォールバック）
+                return text
+                    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+                    .replace(/`(.*?)`/g, '<code>$1</code>')
+                    .replace(/\n/g, '<br>');
+            }
+
             addSyntaxHighlighting(element) {
-                element.querySelectorAll('pre code').forEach((block) => {
-                    hljs.highlightElement(block);
-                });
+                if (typeof hljs !== 'undefined') {
+                    element.querySelectorAll('pre code').forEach((block) => {
+                        hljs.highlightElement(block);
+                    });
+                }
             }
 
             addCopyButtons(element) {
                 element.querySelectorAll('pre').forEach((pre) => {
                     const code = pre.querySelector('code');
-                    const button = document.createElement('button');
-                    button.innerText = 'Copy';
-                    button.className = 'copy-btn';
-                    button.onclick = () => {
-                        navigator.clipboard.writeText(code.innerText);
-                        button.innerText = 'Copied!';
-                        setTimeout(() => { button.innerText = 'Copy'; }, 2000);
-                    };
-                    pre.appendChild(button);
+                    if (code) {
+                        const button = document.createElement('button');
+                        button.innerText = 'Copy';
+                        button.className = 'copy-btn';
+                        button.onclick = async () => {
+                            try {
+                                await navigator.clipboard.writeText(code.innerText);
+                                button.innerText = 'Copied!';
+                                setTimeout(() => { button.innerText = 'Copy'; }, 2000);
+                            } catch (err) {
+                                console.error('Failed to copy:', err);
+                                // フォールバック
+                                const textArea = document.createElement('textarea');
+                                textArea.value = code.innerText;
+                                document.body.appendChild(textArea);
+                                textArea.select();
+                                document.execCommand('copy');
+                                document.body.removeChild(textArea);
+                                button.innerText = 'Copied!';
+                                setTimeout(() => { button.innerText = 'Copy'; }, 2000);
+                            }
+                        };
+                        pre.appendChild(button);
+                    }
                 });
             }
-            // ... (他の関数) ...
+
+            scrollToBottom() {
+                setTimeout(() => {
+                    this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+                }, 50);
+            }
         }
 
+        // グローバル変数として chatApp を定義
+        let chatApp;
+
         document.addEventListener('DOMContentLoaded', () => {
-            // ... (変更なし) ...
+            chatApp = new ChatApp();
+        });
+
+        // エラーハンドリング
+        window.addEventListener('error', (e) => {
+            console.error('Global error:', e.error);
+            if (chatApp) {
+                chatApp.updateStatus('エラー', false);
+            }
+        });
+
+        // ページの可視性が変わった時のヘルスチェック
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden && chatApp) {
+                chatApp.checkHealth();
+            }
         });
     </script>
 </body>
