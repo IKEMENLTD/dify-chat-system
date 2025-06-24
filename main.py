@@ -53,7 +53,7 @@ SUPABASE_BUCKET_NAME = os.getenv('SUPABASE_BUCKET_NAME')
 if LINE_CHANNEL_SECRET and LINE_CHANNEL_ACCESS_TOKEN:
     line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
     handler = WebhookHandler(LINE_CHANNEL_SECRET)
-    messaging_api_v3 = MessagingApiV3(line_bot_api.api_client)
+    messaging_api_v3 = MessagingApiV3(line_bot_api.http_client) # ← http_client に修正
     logger.info("LINE Bot SDK initialized.")
 else:
     line_bot_api = None
