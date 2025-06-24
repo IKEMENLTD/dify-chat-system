@@ -174,7 +174,10 @@ def handle_chatwork_file(room_id, message_id, file_id, from_account_id, raw_data
         logger.error(f"[Chatwork] ファイル処理中の予期せぬエラー: {e}")
 
 def call_dify_api(message, user_id, conversation_id=None):
-    
+    headers = {
+        'Authorization': f'Bearer {DIFY_API_KEY}',
+        'Content-Type': 'application/json'
+    }
     
     # 🔧 修正: 正しいDify API形式
     payload = {
