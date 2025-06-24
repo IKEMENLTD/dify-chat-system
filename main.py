@@ -648,19 +648,30 @@ def chatwork_webhook():
 # =================================================================
 # 10. アプリケーション起動
 # =================================================================
-@app.before_first_request
-def before_first_request():
-    """アプリ起動時の初期化"""
+def create_app():
+    """アプリケーションファクトリ"""
+    # データベース初期化
+    init_database()
+    logger.info("アプリケーション初期化完了")
+    return app
+
+# アプリケーション初期化（本番環境用）
+with app.app_context():
     init_database()
 
 if __name__ == '__main__':
-    # データベース初期化
-    init_database()
-    
     # 環境に応じた設定
     port = int(os.getenv('PORT', 5000))
     debug = os.getenv('FLASK_DEBUG', 'True').lower() == 'true'
     host = os.getenv('HOST', '0.0.0.0')
     
     logger.info(f"アプリケーションを起動中... Port: {port}, Debug: {debug}")
+    
+    # 開発環境では追加の初期化
+    if debug:
+        init_database()
+    
     app.run(host=host, port=port, debug=debug)
+
+# Gunicorn用のアプリケーションオブジェクト
+application = app
