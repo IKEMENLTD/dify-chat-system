@@ -16,7 +16,6 @@ import re
 from supabase import create_client, Client
 from linebot.models import ImageMessage, FileMessage
 from linebot.v3.messaging import MessagingApi as MessagingApiV3
-from linebot.v3.exceptions import ApiException as MessagingApiException
 from flask import abort
 
 # ログ設定
@@ -121,8 +120,9 @@ def get_line_user_profile(user_id):
     try:
         user_profile = messaging_api_v3.get_profile(user_id)
         return user_profile.display_name
-    except MessagingApiException as e:
-        logger.error(f"LINEプロファイルの取得に失敗: {e.body}")
+    except Exception as e:
+        # どんなエラーが発生しても、ログに記録して処理を続けるように変更
+        logger.error(f"LINEプロファイルの取得に失敗: {e}")
         return f"LINE User ({user_id[-6:]})"
     """Dify APIを呼び出す - 修正版"""
     headers = {
