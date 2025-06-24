@@ -80,6 +80,7 @@ def init_database():
     try:
         conn = get_db_connection()
         if not conn:
+            logger.warning("データベース接続に失敗しました")
             return False
             
         cur = conn.cursor()
@@ -102,19 +103,30 @@ def init_database():
             )
         """)
         
-        # インデックス作成
+        # 基本インデックス作成
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id);
         """)
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_conversations_created_at ON conversations(created_at);
         """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_conversations_keywords ON conversations USING GIN(keywords);
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_conversations_search ON conversations USING GIN(to_tsvector('japanese', user_message || ' ' || ai_response));
-        """)
+        
+        # PostgreSQL拡張とインデックス（エラー時はスキップ）
+        try:
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_conversations_keywords ON conversations USING GIN(keywords);
+            """)
+        except Exception as gin_error:
+            logger.warning(f"GINインデックス作成をスキップ: {gin_error}")
+            
+        try:
+            # 日本語全文検索用（オプション）
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_conversations_search 
+                ON conversations USING GIN(to_tsvector('english', user_message || ' ' || ai_response));
+            """)
+        except Exception as fts_error:
+            logger.warning(f"全文検索インデックス作成をスキップ: {fts_error}")
         
         conn.commit()
         cur.close()
@@ -145,6 +157,11 @@ def get_db_connection():
 def extract_keywords_with_ai(message):
     """Claude APIを使ってメッセージからキーワードを抽出"""
     try:
+        # APIキーが設定されていない場合はフォールバック
+        if not ANTHROPIC_API_KEY or ANTHROPIC_API_KEY == 'your-anthropic-api-key':
+            logger.warning("ANTHROPIC_API_KEYが設定されていません。フォールバック処理を使用します。")
+            return extract_keywords_fallback(message)
+            
         headers = {
             'Content-Type': 'application/json',
             'x-api-key': ANTHROPIC_API_KEY,
@@ -230,22 +247,28 @@ def search_database_for_context(keywords, user_id, limit=5):
         if not keywords:
             return []
         
-        # PostgreSQLの全文検索を使用
-        search_query = ' | '.join(keywords)  # OR検索
+        # シンプルなLIKE検索（互換性重視）
+        search_conditions = []
+        search_params = [user_id]
         
-        query = """
+        for keyword in keywords[:3]:  # 最大3つのキーワード
+            search_conditions.append("(user_message ILIKE %s OR ai_response ILIKE %s)")
+            search_params.extend([f'%{keyword}%', f'%{keyword}%'])
+        
+        if not search_conditions:
+            return []
+            
+        query = f"""
             SELECT user_message, ai_response, created_at, keywords
             FROM conversations 
             WHERE user_id = %s 
-            AND (
-                to_tsvector('japanese', user_message || ' ' || ai_response) @@ plainto_tsquery('japanese', %s)
-                OR keywords && %s
-            )
+            AND ({' OR '.join(search_conditions)})
             ORDER BY created_at DESC 
             LIMIT %s
         """
         
-        cur.execute(query, (user_id, search_query, keywords, limit))
+        search_params.append(limit)
+        cur.execute(query, search_params)
         results = cur.fetchall()
         
         cur.close()
@@ -260,6 +283,11 @@ def search_database_for_context(keywords, user_id, limit=5):
 def generate_ai_response_with_context(user_message, context_data, user_id):
     """文脈情報を使ってAI回答を生成"""
     try:
+        # APIキーが設定されていない場合はフォールバック
+        if not ANTHROPIC_API_KEY or ANTHROPIC_API_KEY == 'your-anthropic-api-key':
+            logger.warning("ANTHROPIC_API_KEYが設定されていません。基本的な回答を返します。")
+            return generate_fallback_response(user_message, context_data)
+            
         headers = {
             'Content-Type': 'application/json',
             'x-api-key': ANTHROPIC_API_KEY,
@@ -313,11 +341,35 @@ def generate_ai_response_with_context(user_message, context_data, user_id):
             return result['content'][0]['text']
         else:
             logger.error(f"Claude API エラー: {response.status_code} - {response.text}")
-            return "申し訳ございませんが、現在AIサービスに接続できません。しばらく後にお試しください。"
+            return generate_fallback_response(user_message, context_data)
             
     except Exception as e:
         logger.error(f"AI回答生成エラー: {e}")
-        return f"エラーが発生しました: {str(e)}"
+        return generate_fallback_response(user_message, context_data)
+
+def generate_fallback_response(user_message, context_data):
+    """APIが利用できない場合のフォールバック回答"""
+    if context_data:
+        response = f"お探しの情報について、過去の会話から関連する内容を見つけました：\n\n"
+        for i, item in enumerate(context_data[:2], 1):
+            response += f"**{i}. {item['created_at'].strftime('%Y年%m月%d日')}の会話**\n"
+            response += f"質問: {item['user_message'][:100]}...\n"
+            response += f"回答: {item['ai_response'][:200]}...\n\n"
+        response += "詳細な情報については、ANTHROPIC_API_KEYを設定してClaude APIを有効にしてください。"
+    else:
+        response = f"""
+申し訳ございませんが、現在AIサービスが利用できません。
+
+**お問い合わせ内容**: {user_message}
+
+基本的な対応方法：
+1. ANTHROPIC_API_KEYが正しく設定されているか確認してください
+2. しばらく時間をおいてから再度お試しください
+3. 詳細なサポートが必要な場合は管理者にお問い合わせください
+
+過去の会話履歴からの関連情報は見つかりませんでした。
+"""
+    return response
 
 def save_conversation_to_db(user_id, conversation_id, user_message, ai_response, keywords, context_used, response_time_ms, source_platform='web'):
     """会話をデータベースに保存"""
