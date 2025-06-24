@@ -2,6 +2,8 @@ import os
 import json
 import requests
 import psycopg2
+from linebot.v3.messaging import Configuration
+from linebot.v3.messaging import ApiClient
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
@@ -51,15 +53,23 @@ SUPABASE_BUCKET_NAME = os.getenv('SUPABASE_BUCKET_NAME')
 
 # LINE APIインスタンス生成
 if LINE_CHANNEL_SECRET and LINE_CHANNEL_ACCESS_TOKEN:
+    # v2のAPIクライアント（ファイルのダウンロードで引き続き使用）
     line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+    
+    # v2のWebhookハンドラ
     handler = WebhookHandler(LINE_CHANNEL_SECRET)
-    messaging_api_v3 = MessagingApiV3(line_bot_api.http_client) # ← http_client に修正
-    logger.info("LINE Bot SDK initialized.")
+    
+    # v3のAPIクライアント（ユーザープロファイルの取得で使用）を正式な方法で初期化
+    configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
+    api_client = ApiClient(configuration)
+    messaging_api_v3 = MessagingApiV3(api_client)
+    
+    logger.info("LINE Bot SDK v2 and v3 initialized.")
 else:
     line_bot_api = None
     handler = None
+    messaging_api_v3 = None
     logger.warning("LINE Bot credentials not set. LINE integration will be disabled.")
-
 # Supabaseクライアント初期化
 if SUPABASE_URL and SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
