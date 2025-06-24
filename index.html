@@ -1134,18 +1134,20 @@
             }
 
             displaySearchResults(results, query) {
-                if (results.length === 0) {
+                if (!results || results.length === 0) {
                     this.addMessage(`「${query}」に該当する情報は見つかりませんでした。`, 'ai');
                     return;
                 }
 
-                let htmlContent = `「${query}」の検索結果が${results.length}件見つかりました。<br><br>`;
+                let htmlContent = `「${query}」の検索結果が${results.length}件見つかりました。<br><hr style="border:0; border-top: 1px solid #eee; margin: 8px 0;">`;
                 
                 results.forEach(res => {
-                    const date = new Date(res.created_at).toLocaleString('ja-JP');
-                    const sourceLabel = res.source === 'ai_chat' ? 'AIチャット' : res.source;
-                    
-                    const linkedMessage = res.message.replace(
+                    const date = res.created_at ? new Date(res.created_at).toLocaleString('ja-JP') : '日付不明';
+                    const sourceLabel = res.source === 'ai_chat' ? 'AIチャット' : (res.source || '不明');
+
+                    // ▼▼▼ ここが重要：メッセージが空(null)でもエラーにならないように修正 ▼▼▼
+                    let messageText = res.message || '';
+                    const linkedMessage = messageText.replace(
                         /(https?:\/\/[^\s"'<>`]+)/g,
                         '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>'
                     );
@@ -1155,7 +1157,7 @@
                             <div class="search-result-header">
                                 <strong>[${sourceLabel}]</strong> - ${date}
                             </div>
-                            <div class="search-result-message">${linkedMessage}</div>
+                            <div class="search-result-message">${linkedMessage || '（メッセージ本文なし）'}</div>
                         </div>
                         <hr style="border:0; border-top: 1px solid #eee; margin: 8px 0;">
                     `;
