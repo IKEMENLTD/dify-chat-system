@@ -14,7 +14,7 @@ python-dotenv==1.0.0
 # Production Server
 gunicorn==21.2.0
 
-# Security (optional but recommended)
+# Security
 Werkzeug==3.0.1
 
 # Utilities
@@ -23,8 +23,11 @@ certifi==2023.11.17
 charset-normalizer==3.3.2
 idna==3.6
 
-# for LINE Bot integration
+# LINE Bot integration
 line-bot-sdk==3.9.0
 
-
+# Supabase
 supabase==2.5.0
+
+# Claude AI API
+anthropic==0.20.0
