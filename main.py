@@ -17,6 +17,7 @@ from supabase import create_client, Client
 from linebot.models import ImageMessage, FileMessage
 from linebot.v3.messaging import MessagingApi as MessagingApiV3
 from linebot.v3.exceptions import ApiException as MessagingApiException
+from flask import abort
 
 # ログ設定
 logging.basicConfig(
@@ -42,37 +43,35 @@ LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 
 # Chatwork Webhook 設定
 CHATWORK_WEBHOOK_TOKEN = os.getenv('CHATWORK_WEBHOOK_TOKEN')
-
-# 以下のブロックで元の該当部分を置き換える
-
-# Chatwork Webhook 設定
-CHATWORK_WEBHOOK_TOKEN = os.getenv('CHATWORK_WEBHOOK_TOKEN')
-# 🔽 追加
 CHATWORK_API_TOKEN = os.getenv('CHATWORK_API_TOKEN')
+
+# Supabase Storage 設定
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 SUPABASE_BUCKET_NAME = os.getenv('SUPABASE_BUCKET_NAME')
 
-# 🔽 LINE APIとSupabaseクライアントの初期化を更新
-line_bot_api = None
-handler = None
-messaging_api_v3 = None
+# LINE APIインスタンス生成
 if LINE_CHANNEL_SECRET and LINE_CHANNEL_ACCESS_TOKEN:
     line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
     handler = WebhookHandler(LINE_CHANNEL_SECRET)
-    messaging_api_v3 = MessagingApiV3(line_bot_api.api_client) # V3 APIクライアント
+    messaging_api_v3 = MessagingApiV3(line_bot_api.api_client)
     logger.info("LINE Bot SDK initialized.")
 else:
+    line_bot_api = None
+    handler = None
     logger.warning("LINE Bot credentials not set. LINE integration will be disabled.")
 
-supabase = None
+# Supabaseクライアント初期化
 if SUPABASE_URL and SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
     logger.info(f"Supabase client initialized for bucket '{SUPABASE_BUCKET_NAME}'.")
+else:
+    supabase = None
+    logger.warning("Supabase credentials not set. File upload will be disabled.")
 
-# 必須環境変数チェックを更新
-if not all([DATABASE_URL, DIFY_API_KEY, line_bot_api, supabase, CHATWORK_API_TOKEN]):
-    logger.error("必要な環境変数が不足しています（DATABASE_URL, DIFY_API_KEY, LINE, Supabase, CHATWORK_API_TOKENは必須です）")
+# 必須環境変数チェック
+if not DATABASE_URL or not DIFY_API_KEY:
+    logger.error("DATABASE_URL and DIFY_API_KEY must be set")
     raise ValueError("Missing required environment variables")
 
 # レート制限設定
@@ -117,8 +116,7 @@ def get_db_connection():
         logger.error(f"Database connection error: {e}")
         return None
 
-def call_dify_api(message, user_id, conversation_id=None):
-    def get_line_user_profile(user_id):
+def get_line_user_profile(user_id):
     """LINEユーザーのプロファイルを取得する (v3 SDKを使用)"""
     try:
         user_profile = messaging_api_v3.get_profile(user_id)
@@ -164,6 +162,9 @@ def handle_chatwork_file(room_id, message_id, file_id, from_account_id, raw_data
         logger.error(f"[Chatwork] ファイル処理APIエラー: {e}")
     except Exception as e:
         logger.error(f"[Chatwork] ファイル処理中の予期せぬエラー: {e}")
+
+def call_dify_api(message, user_id, conversation_id=None):
+    
     
     # 🔧 修正: 正しいDify API形式
     payload = {
@@ -723,8 +724,14 @@ def handle_line_message(event):
         logger.error(f"Error in handle_line_message: {e}")
 
 @handler.add(FollowEvent)
+@handler.add(FollowEvent)
 def handle_follow(event):
-    @handler.add(MessageEvent, message=ImageMessage)
+    """Botが友だち追加されたときのイベント"""
+    logger.info(f"Followed by user: {event.source.user_id}")
+    # 必要であればここで挨拶メッセージなどを送る
+    # line_bot_api.reply_message(event.reply_token, TextSendMessage(text='友だち追加ありがとうございます！'))
+
+@handler.add(MessageEvent, message=ImageMessage)
 def handle_line_image_message(event):
     """LINEの画像メッセージを処理し、Supabase Storageにアップロード"""
     try:
@@ -775,12 +782,6 @@ def handle_line_file_message(event):
         logger.info(f"LINEのPDFをSupabaseにアップロード: {public_url}")
     except Exception as e:
         logger.error(f"LINEのPDF処理エラー: {e}")
-
-    """Botが友だち追加されたときのイベント"""
-    logger.info(f"Followed by user: {event.source.user_id}")
-    # 必要であればここで挨拶メッセージなどを送る
-    # line_bot_api.reply_message(event.reply_token, TextSendMessage(text='友だち追加ありがとうございます！'))
-
 
 # --- Chatwork Webhook ---
 # この関数で元の chatwork_webhook を完全に置き換える
