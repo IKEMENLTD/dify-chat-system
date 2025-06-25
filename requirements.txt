@@ -31,3 +31,6 @@ supabase==2.5.0
 
 # Claude AI API
 anthropic==0.20.0
+
+dateparser
+pytz
