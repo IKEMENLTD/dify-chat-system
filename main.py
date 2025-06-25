@@ -78,7 +78,8 @@ if SUPABASE_URL and SUPABASE_KEY:
 # 3. データベース初期化
 # =================================================================
 def init_database():
-    """データベーステーブルを初期化"""
+    """データベーステーブルを初期化または更新する"""
+    conn = None
     try:
         conn = get_db_connection()
         if not conn:
@@ -87,7 +88,7 @@ def init_database():
             
         cur = conn.cursor()
         
-        # conversationsテーブル
+        # conversationsテーブルの作成（既存の処理）
         cur.execute("""
             CREATE TABLE IF NOT EXISTS conversations (
                 id SERIAL PRIMARY KEY,
@@ -99,46 +100,52 @@ def init_database():
                 context_used TEXT,
                 source_platform VARCHAR(50) DEFAULT 'web',
                 response_time_ms INTEGER,
-                satisfaction_rating INTEGER CHECK (satisfaction_rating >= 1 AND satisfaction_rating <= 5),
+                satisfaction_rating INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         
-        # 基本インデックス作成
+        # remindersテーブルの作成（前回のリマインダー機能で追加）
         cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id);
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_conversations_created_at ON conversations(created_at);
+            CREATE TABLE IF NOT EXISTS reminders (
+                id SERIAL PRIMARY KEY,
+                user_id VARCHAR(255) NOT NULL,
+                target_id VARCHAR(255) NOT NULL,
+                reminder_content TEXT NOT NULL,
+                due_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                status VARCHAR(50) DEFAULT 'active',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            )
         """)
         
-        # PostgreSQL拡張とインデックス（エラー時はスキップ）
-        try:
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_conversations_keywords ON conversations USING GIN(keywords);
-            """)
-        except Exception as gin_error:
-            logger.warning(f"GINインデックス作成をスキップ: {gin_error}")
-            
-        try:
-            # 日本語全文検索用（オプション）
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_conversations_search 
-                ON conversations USING GIN(to_tsvector('english', user_message || ' ' || ai_response));
-            """)
-        except Exception as fts_error:
-            logger.warning(f"全文検索インデックス作成をスキップ: {fts_error}")
-        
+        # --- ▼ ここからが今回の改造部分 ▼ ---
+        # remindersテーブルに 'is_recurring' カラムがなければ追加する
+        cur.execute("SELECT 1 FROM information_schema.columns WHERE table_name='reminders' AND column_name='is_recurring'")
+        if cur.fetchone() is None:
+            cur.execute("ALTER TABLE reminders ADD COLUMN is_recurring BOOLEAN DEFAULT FALSE;")
+            logger.info("remindersテーブルに 'is_recurring' カラムを追加しました。")
+
+        # remindersテーブルに 'recurrence_rule' カラムがなければ追加する
+        cur.execute("SELECT 1 FROM information_schema.columns WHERE table_name='reminders' AND column_name='recurrence_rule'")
+        if cur.fetchone() is None:
+            cur.execute("ALTER TABLE reminders ADD COLUMN recurrence_rule VARCHAR(100);")
+            logger.info("remindersテーブルに 'recurrence_rule' カラムを追加しました。")
+        # --- ▲ ここまでが改造部分 ▲ ---
+
         conn.commit()
         cur.close()
-        conn.close()
-        logger.info("データベース初期化完了")
+        logger.info("データベースの初期化・更新が完了しました。")
         return True
         
     except Exception as e:
-        logger.error(f"データベース初期化エラー: {e}")
+        logger.error(f"データベース初期化・更新エラー: {e}")
+        if conn:
+            conn.rollback() # エラーが発生した場合は変更を元に戻す
         return False
+    finally:
+        if conn:
+            conn.close()
 
 # =================================================================
 # 4. ヘルパー関数
