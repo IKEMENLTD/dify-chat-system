@@ -280,30 +280,61 @@ def extract_keywords_fallback(message):
     
     return keywords[:5]
 
+# =================================================================
+# 究極検索システムの統合
+# =================================================================
+
+# 上記の究極検索システムをインポート（実際には同じファイル内に配置）
+# from ultimate_search_system import search_database_for_context_ultimate
+
 def search_database_for_context(keywords, user_id, limit=5):
-    """キーワードを使ってデータベースから関連する会話を検索（大幅改善版）"""
+    """検索のメインエントリーポイント - 究極版使用"""
+    try:
+        # 究極検索システムを使用
+        results = search_database_for_context_ultimate(keywords, user_id, limit)
+        
+        if results:
+            logger.info(f"究極検索成功: {len(results)} 件")
+            return results
+        else:
+            # フォールバック：従来の検索
+            logger.warning("究極検索で結果なし、フォールバック検索実行")
+            return search_database_for_context_fallback(keywords, user_id, limit)
+            
+    except Exception as e:
+        logger.error(f"検索システムエラー: {e}")
+        # フォールバック：従来の検索
+        return search_database_for_context_fallback(keywords, user_id, limit)
+
+def search_database_for_context_fallback(keywords, user_id, limit=5):
+    """フォールバック検索（従来版）"""
     try:
         conn = get_db_connection()
         if not conn:
-            logger.error("データベース接続に失敗")
             return []
             
         cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # キーワードリストの処理
+        if isinstance(keywords, list):
+            search_terms = keywords
+        elif isinstance(keywords, dict):
+            search_terms = keywords.get('primary_keywords', [])
+        else:
+            search_terms = [str(keywords)]
+        
         all_results = []
         
-        # 1. まず external_chat_logs テーブルから検索（メインのデータソース）
+        # external_chat_logs検索
         try:
-            # キーワードがある場合の検索
-            if keywords:
-                search_conditions = []
-                search_params = []
-                
-                # 各キーワードに対してOR条件を作成
-                for keyword in keywords:
-                    search_conditions.append("(message ILIKE %s OR raw_data::text ILIKE %s)")
-                    search_params.extend([f'%{keyword}%', f'%{keyword}%'])
-                
-                # クエリ実行
+            search_conditions = []
+            search_params = []
+            
+            for term in search_terms[:5]:  # 最大5個のキーワード
+                search_conditions.append("(message ILIKE %s OR raw_data::text ILIKE %s)")
+                search_params.extend([f'%{term}%', f'%{term}%'])
+            
+            if search_conditions:
                 query = f"""
                     SELECT 
                         message as user_message, 
@@ -316,107 +347,66 @@ def search_database_for_context(keywords, user_id, limit=5):
                     ORDER BY created_at DESC 
                     LIMIT %s
                 """
-                search_params.append(limit * 2)  # 多めに取得
+                search_params.append(limit * 2)
                 
                 cur.execute(query, search_params)
                 ext_results = cur.fetchall()
-                
-                # 結果をフォーマット
-                for row in ext_results:
-                    result = dict(row)
-                    # raw_dataが辞書形式の場合は文字列化
-                    if isinstance(result.get('ai_response'), str):
-                        try:
-                            # JSON文字列の場合はそのまま使用
-                            result['ai_response'] = result['ai_response']
-                        except:
-                            pass
-                    all_results.append(result)
-                
-                logger.info(f"external_chat_logs検索: {len(ext_results)} 件見つかりました")
+                all_results.extend([dict(row) for row in ext_results])
+                logger.info(f"フォールバック external_chat_logs検索: {len(ext_results)} 件")
+        except Exception as e:
+            logger.warning(f"external_chat_logs フォールバック検索エラー: {e}")
+        
+        # conversations検索
+        try:
+            search_conditions = []
+            search_params = []
             
-            # キーワードが無い場合は最新のデータを取得
-            else:
-                cur.execute("""
+            for term in search_terms[:5]:
+                search_conditions.append("(user_message ILIKE %s OR ai_response ILIKE %s)")
+                search_params.extend([f'%{term}%', f'%{term}%'])
+            
+            if search_conditions:
+                query = f"""
                     SELECT 
-                        message as user_message, 
-                        raw_data::text as ai_response, 
+                        user_message, 
+                        ai_response, 
                         created_at, 
-                        user_name,
-                        'external_chat_logs' as source
-                    FROM external_chat_logs 
+                        user_id as user_name,
+                        'conversations' as source
+                    FROM conversations 
+                    WHERE ({' OR '.join(search_conditions)})
                     ORDER BY created_at DESC 
                     LIMIT %s
-                """, (limit,))
-                recent_results = cur.fetchall()
-                all_results.extend([dict(row) for row in recent_results])
-                logger.info(f"最新データ取得: {len(recent_results)} 件")
+                """
+                search_params.append(limit)
                 
+                cur.execute(query, search_params)
+                conv_results = cur.fetchall()
+                all_results.extend([dict(row) for row in conv_results])
+                logger.info(f"フォールバック conversations検索: {len(conv_results)} 件")
         except Exception as e:
-            logger.error(f"external_chat_logs検索エラー: {e}")
-        
-        # 2. conversations テーブルからも検索（補完的）
-        try:
-            if keywords:
-                search_conditions = []
-                search_params = []
-                
-                for keyword in keywords:
-                    search_conditions.append("(user_message ILIKE %s OR ai_response ILIKE %s)")
-                    search_params.extend([f'%{keyword}%', f'%{keyword}%'])
-                
-                if search_conditions:
-                    query = f"""
-                        SELECT 
-                            user_message, 
-                            ai_response, 
-                            created_at, 
-                            keywords,
-                            'conversations' as source
-                        FROM conversations 
-                        WHERE ({' OR '.join(search_conditions)})
-                        ORDER BY created_at DESC 
-                        LIMIT %s
-                    """
-                    search_params.append(limit)
-                    
-                    cur.execute(query, search_params)
-                    conv_results = cur.fetchall()
-                    all_results.extend([dict(row) for row in conv_results])
-                    logger.info(f"conversations検索: {len(conv_results)} 件見つかりました")
-        except Exception as e:
-            logger.warning(f"conversations検索エラー（スキップ）: {e}")
+            logger.warning(f"conversations フォールバック検索エラー: {e}")
         
         cur.close()
         conn.close()
         
-        # 3. 結果の重複除去と整理
+        # 重複除去
         unique_results = []
         seen_messages = set()
         
         for result in all_results:
-            message_key = result.get('user_message', '')[:50]  # 最初の50文字で重複判定
+            message_key = (result.get('user_message', '') or '')[:50]
             if message_key and message_key not in seen_messages:
                 seen_messages.add(message_key)
                 unique_results.append(result)
         
-        # 日付でソート（新しい順）
+        # 日付順ソート
         unique_results.sort(key=lambda x: x.get('created_at', ''), reverse=True)
         
-        # 結果を制限
-        final_results = unique_results[:limit]
-        
-        logger.info(f"最終検索結果: {len(final_results)} 件を返します")
-        
-        # デバッグ用：見つかった結果の概要をログ出力
-        for i, result in enumerate(final_results):
-            msg_preview = (result.get('user_message', '') or '')[:30]
-            logger.info(f"結果{i+1}: {msg_preview}...")
-        
-        return final_results
+        return unique_results[:limit]
         
     except Exception as e:
-        logger.error(f"検索処理全体でエラー: {e}")
+        logger.error(f"フォールバック検索エラー: {e}")
         return []
 
 def generate_ai_response_with_context(user_message, context_data, user_id):
@@ -953,27 +943,90 @@ def debug_conversations():
         logger.error(f"デバッグ取得エラー: {e}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/debug/search/<query>')
-def debug_search(query):
-    """デバッグ用：検索処理の詳細を確認"""
+@app.route('/api/debug/ultimate-search/<query>')
+def debug_ultimate_search(query):
+    """究極検索システムのデバッグ"""
     try:
-        # キーワード抽出
-        keywords = extract_keywords_with_ai(query)
-        logger.info(f"デバッグ - 抽出キーワード: {keywords}")
+        user_id = "debug_user"
         
-        # データベース検索
-        user_id = "debug_user"  # デバッグ用
-        context_data = search_database_for_context(keywords, user_id, limit=10)
+        # 究極検索実行
+        results = search_database_for_context_ultimate(query, user_id, limit=10)
+        
+        # 各結果の詳細スコア情報
+        detailed_results = []
+        for i, result in enumerate(results):
+            detailed_result = {
+                'rank': i + 1,
+                'user_message': result.get('user_message', '')[:100],
+                'ai_response': result.get('ai_response', '')[:200],
+                'created_at': str(result.get('created_at', '')),
+                'source': result.get('source', ''),
+                'scores': {
+                    'relevance_score': result.get('relevance_score', 0.0),
+                    'semantic_score': result.get('semantic_score', 0.0),
+                    'ngram_score': result.get('ngram_score', 0.0),
+                    'temporal_score': result.get('temporal_score', 0.0),
+                    'personalization_boost': result.get('personalization_boost', 0.0)
+                }
+            }
+            detailed_results.append(detailed_result)
         
         return jsonify({
             'query': query,
-            'extracted_keywords': keywords,
-            'search_results_count': len(context_data),
-            'search_results': context_data
+            'total_results': len(results),
+            'results': detailed_results,
+            'system_status': {
+                'ultimate_search_enabled': True,
+                'semantic_engine_initialized': hasattr(ultimate_search_engine, 'semantic_engine'),
+                'ngram_engine_initialized': hasattr(ultimate_search_engine, 'ngram_engine')
+            }
         })
         
     except Exception as e:
-        logger.error(f"デバッグ検索エラー: {e}")
+        logger.error(f"究極検索デバッグエラー: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/debug/search-analytics/<user_id>')
+def debug_search_analytics(user_id):
+    """ユーザーの検索分析情報"""
+    try:
+        # ユーザー行動パターン取得
+        preferences = ultimate_search_engine.behavior_learner.get_user_preferences(user_id)
+        
+        return jsonify({
+            'user_id': user_id,
+            'search_patterns': preferences,
+            'behavior_data': {
+                'total_searches': preferences.get('search_count', 0),
+                'frequent_keywords': preferences.get('frequent_words', {}),
+                'preferred_content_types': preferences.get('preferred_content_types', {}),
+                'active_hours': preferences.get('active_hours', [])
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"検索分析デバッグエラー: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/search/feedback', methods=['POST'])
+def record_search_feedback():
+    """検索フィードバックを記録"""
+    try:
+        data = request.json
+        user_id = data.get('user_id')
+        query = data.get('query')
+        document_id = data.get('document_id')
+        clicked = data.get('clicked', True)
+        
+        # フィードバックを機械学習エンジンに記録
+        ultimate_search_engine.ml_engine.record_user_feedback(
+            user_id, query, document_id, clicked
+        )
+        
+        return jsonify({'success': True, 'message': 'フィードバックを記録しました'})
+        
+    except Exception as e:
+        logger.error(f"フィードバック記録エラー: {e}")
         return jsonify({'error': str(e)}), 500
 def create_app():
     """アプリケーションファクトリ"""
