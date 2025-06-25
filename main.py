@@ -1041,8 +1041,8 @@ def create_app():
     return app
 
 # アプリケーション初期化（本番環境用）
-with app.app_context():
-    init_database()
+# with app.app_context():
+#     init_database()
 
 if __name__ == '__main__':
     # 環境に応じた設定
