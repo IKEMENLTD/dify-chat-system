@@ -772,60 +772,84 @@ def handle_line_message(event):
     """LINEメッセージハンドラ"""
     try:
         user_id = f"line_{event.source.user_id}"
-        # メッセージの前後の不要な空白を削除
         user_message = event.message.text.strip()
-        
-        # 宛先IDを取得（グループチャットにも対応）
         target_id = event.source.user_id
         if hasattr(event.source, 'group_id'):
             target_id = event.source.group_id
 
         # --- リマインダー機能 ---
         if user_message.startswith('リマインダー'):
-            # "リマインダー" とだけ送られた場合は使い方を案内
             if user_message == 'リマインダー':
                 reply_text = """リマインダー機能です。
-「リマインダー 明日15時 会議」のように、内容と日時を教えてください。
-登録済みの予定は「一覧」と送ると確認できます。"""
+「リマインダー 明日15時 会議」のように内容と日時を教えてください。
+「リマインダー 毎週月曜 朝8時 ゴミ出し」のような繰り返し設定も可能です。"""
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
                 return 'OK'
 
-            # 「リマインダー」の後のテキストを解析
             reminder_text = user_message.replace('リマインダー', '', 1).strip()
             
-            # 日本語の日時を解析
+            # --- ▼ 繰り返し設定の判定処理を追加 ▼ ---
+            is_recurring = False
+            recurrence_rule = None
+            
+            # 簡易的な繰り返しルールの判定
+            if "毎日" in reminder_text:
+                is_recurring = True
+                recurrence_rule = "daily"
+            elif "毎週" in reminder_text:
+                is_recurring = True
+                # "毎週X曜"の形式を判定 (例: 毎週月曜)
+                weekdays = {"月": 0, "火": 1, "水": 2, "木": 3, "金": 4, "土": 5, "日": 6}
+                for day_char, day_num in weekdays.items():
+                    if f"毎週{day_char}" in reminder_text:
+                        recurrence_rule = f"weekly_{day_num}"
+                        break
+                if recurrence_rule is None:
+                    recurrence_rule = f"weekly_{datetime.now(pytz.timezone('Asia/Tokyo')).weekday()}" # 曜日指定がなければ今日の曜日に
+
+            # 日時の解析
             parsed_datetime = dateparser.parse(reminder_text, languages=['ja'])
             
             if parsed_datetime:
-                # タイムゾーンを日本時間に設定
                 now = datetime.now(pytz.timezone('Asia/Tokyo'))
                 if parsed_datetime.tzinfo is None:
                     parsed_datetime = pytz.timezone('Asia/Tokyo').localize(parsed_datetime)
-                
-                # もし過去の日時なら、未来の日付になるように調整
-                if parsed_datetime < now:
-                    parsed_datetime += relativedelta(days=1)
-                    if parsed_datetime < now:
-                         parsed_datetime += relativedelta(years=1, days=-1)
 
-                # データベースに保存
+                # 初回通知時間を計算
+                if is_recurring:
+                    # 時間部分だけを使い、日付は今日に設定
+                    first_due_time = parsed_datetime.time()
+                    first_due_datetime = now.replace(hour=first_due_time.hour, minute=first_due_time.minute, second=0, microsecond=0)
+                    
+                    if recurrence_rule.startswith("weekly"):
+                        target_weekday = int(recurrence_rule.split('_')[1])
+                        days_ahead = target_weekday - first_due_datetime.weekday()
+                        if days_ahead < 0 or (days_ahead == 0 and first_due_datetime.time() < now.time()):
+                            days_ahead += 7
+                        first_due_datetime += timedelta(days=days_ahead)
+                    elif first_due_datetime < now:
+                        first_due_datetime += timedelta(days=1)
+                    parsed_datetime = first_due_datetime
+                
+                # データベースに保存（繰り返し情報も追加）
                 conn = get_db_connection()
                 cur = conn.cursor()
                 cur.execute(
-                    "INSERT INTO reminders (user_id, target_id, reminder_content, due_at) VALUES (%s, %s, %s, %s)",
-                    (user_id, f"line_{target_id}", reminder_text, parsed_datetime)
+                    "INSERT INTO reminders (user_id, target_id, reminder_content, due_at, is_recurring, recurrence_rule) VALUES (%s, %s, %s, %s, %s, %s)",
+                    (user_id, f"line_{target_id}", reminder_text, parsed_datetime, is_recurring, recurrence_rule)
                 )
                 conn.commit()
                 cur.close()
                 conn.close()
                 
-                reply_text = f"了解しました！\n【{reminder_text}】を\n{parsed_datetime.strftime('%Y年%m月%d日 %H:%M')}にお知らせします。"
+                reply_text = f"了解しました！\n【{reminder_text}】を\n{parsed_datetime.strftime('%Y年%m月%d日 %H:%M')}からお知らせします。"
             else:
                 reply_text = "すみません、日時をうまく読み取れませんでした。「明日15時」「毎週金曜朝8時」のように具体的に教えてください。"
             
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
             return 'OK'
 
+        
         # --- 一覧表示機能 ---
         elif user_message == '一覧':
             conn = get_db_connection()
