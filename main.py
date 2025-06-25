@@ -280,112 +280,102 @@ def extract_keywords_fallback(message):
     
     return keywords[:5]
 
-# =================================================================
-# 究極検索システムの統合
-# =================================================================
-
-# 上記の究極検索システムをインポート（実際には同じファイル内に配置）
-# from ultimate_search_system import search_database_for_context_ultimate
-
 def search_database_for_context(keywords, user_id, limit=5):
-    """検索のメインエントリーポイント - 究極版使用"""
+    """完璧検索システムのメインエントリーポイント"""
     try:
-        # 究極検索システムを使用
-        results = search_database_for_context_ultimate(keywords, user_id, limit)
+        # 完璧検索を使用
+        results = search_database_for_context_perfect(keywords, user_id, limit)
         
         if results:
-            logger.info(f"究極検索成功: {len(results)} 件")
+            logger.info(f"完璧検索成功: {len(results)} 件")
+            # スコア情報をログ出力（デバッグ用）
+            for i, result in enumerate(results[:3]):
+                score = result.get('final_score', 0)
+                msg_preview = (result.get('user_message', '') or '')[:30]
+                logger.info(f"結果{i+1}(スコア:{score:.2f}): {msg_preview}...")
             return results
         else:
-            # フォールバック：従来の検索
-            logger.warning("究極検索で結果なし、フォールバック検索実行")
-            return search_database_for_context_fallback(keywords, user_id, limit)
+            # フォールバック：基本検索
+            logger.warning("完璧検索で結果なし、基本検索にフォールバック")
+            return search_database_basic_fallback(keywords, user_id, limit)
             
     except Exception as e:
-        logger.error(f"検索システムエラー: {e}")
-        # フォールバック：従来の検索
-        return search_database_for_context_fallback(keywords, user_id, limit)
+        logger.error(f"完璧検索システムエラー: {e}")
+        # 必ずフォールバック検索を実行
+        return search_database_basic_fallback(keywords, user_id, limit)
 
-def search_database_for_context_fallback(keywords, user_id, limit=5):
-    """フォールバック検索（従来版）"""
+def search_database_basic_fallback(keywords, user_id, limit=5):
+    """基本検索（絶対に失敗しないフォールバック）"""
     try:
         conn = get_db_connection()
         if not conn:
+            logger.error("データベース接続失敗")
             return []
             
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        # キーワードリストの処理
+        # キーワード処理
         if isinstance(keywords, list):
-            search_terms = keywords
+            search_terms = [str(k) for k in keywords if k]
         elif isinstance(keywords, dict):
-            search_terms = keywords.get('primary_keywords', [])
+            search_terms = [str(k) for k in keywords.get('primary_keywords', []) if k]
         else:
-            search_terms = [str(keywords)]
+            search_terms = [str(keywords)] if keywords else []
         
-        all_results = []
-        
-        # external_chat_logs検索
-        try:
-            search_conditions = []
-            search_params = []
+        if not search_terms:
+            # キーワードがない場合は最新のデータを返す
+            cur.execute("""
+                SELECT 
+                    message as user_message, 
+                    raw_data::text as ai_response, 
+                    created_at, 
+                    user_name,
+                    'external_chat_logs' as source
+                FROM external_chat_logs 
+                WHERE message IS NOT NULL
+                ORDER BY created_at DESC 
+                LIMIT %s
+            """, (limit,))
             
-            for term in search_terms[:5]:  # 最大5個のキーワード
+            results = [dict(row) for row in cur.fetchall()]
+            cur.close()
+            conn.close()
+            logger.info(f"基本検索（最新データ）: {len(results)} 件")
+            return results
+        
+        # キーワード検索
+        search_conditions = []
+        search_params = []
+        
+        for term in search_terms[:5]:  # 最大5個のキーワード
+            if len(term.strip()) >= 2:  # 2文字以上のキーワードのみ
                 search_conditions.append("(message ILIKE %s OR raw_data::text ILIKE %s)")
                 search_params.extend([f'%{term}%', f'%{term}%'])
-            
-            if search_conditions:
-                query = f"""
-                    SELECT 
-                        message as user_message, 
-                        raw_data::text as ai_response, 
-                        created_at, 
-                        user_name,
-                        'external_chat_logs' as source
-                    FROM external_chat_logs 
-                    WHERE ({' OR '.join(search_conditions)})
-                    ORDER BY created_at DESC 
-                    LIMIT %s
-                """
-                search_params.append(limit * 2)
-                
-                cur.execute(query, search_params)
-                ext_results = cur.fetchall()
-                all_results.extend([dict(row) for row in ext_results])
-                logger.info(f"フォールバック external_chat_logs検索: {len(ext_results)} 件")
-        except Exception as e:
-            logger.warning(f"external_chat_logs フォールバック検索エラー: {e}")
         
-        # conversations検索
-        try:
-            search_conditions = []
-            search_params = []
-            
-            for term in search_terms[:5]:
-                search_conditions.append("(user_message ILIKE %s OR ai_response ILIKE %s)")
-                search_params.extend([f'%{term}%', f'%{term}%'])
-            
-            if search_conditions:
-                query = f"""
-                    SELECT 
-                        user_message, 
-                        ai_response, 
-                        created_at, 
-                        user_id as user_name,
-                        'conversations' as source
-                    FROM conversations 
-                    WHERE ({' OR '.join(search_conditions)})
-                    ORDER BY created_at DESC 
-                    LIMIT %s
-                """
-                search_params.append(limit)
-                
-                cur.execute(query, search_params)
-                conv_results = cur.fetchall()
-                all_results.extend([dict(row) for row in conv_results])
-                logger.info(f"フォールバック conversations検索: {len(conv_results)} 件")
-        except Exception as e:
-            logger.warning(f"conversations フォールバック検索エラー: {e}")
+        if not search_conditions:
+            # 有効なキーワードがない場合
+            cur.close()
+            conn.close()
+            return []
+        
+        query = f"""
+            SELECT 
+                message as user_message, 
+                raw_data::text as ai_response, 
+                created_at, 
+                user_name,
+                'external_chat_logs' as source
+            FROM external_chat_logs 
+            WHERE ({' OR '.join(search_conditions)})
+            AND message IS NOT NULL
+            ORDER BY created_at DESC 
+            LIMIT %s
+        """
+        
+        search_params.append(limit * 2)  # 余裕を持って取得
+        
+        cur.execute(query, search_params)
+        results = [dict(row) for row in cur.fetchall()]
         
         cur.close()
         conn.close()
@@ -394,19 +384,21 @@ def search_database_for_context_fallback(keywords, user_id, limit=5):
         unique_results = []
         seen_messages = set()
         
-        for result in all_results:
-            message_key = (result.get('user_message', '') or '')[:50]
+        for result in results:
+            message = result.get('user_message', '') or ''
+            message_key = message[:50]  # 最初の50文字
+            
             if message_key and message_key not in seen_messages:
                 seen_messages.add(message_key)
                 unique_results.append(result)
         
-        # 日付順ソート
-        unique_results.sort(key=lambda x: x.get('created_at', ''), reverse=True)
-        
-        return unique_results[:limit]
+        final_results = unique_results[:limit]
+        logger.info(f"基本検索成功: {len(final_results)} 件")
+        return final_results
         
     except Exception as e:
-        logger.error(f"フォールバック検索エラー: {e}")
+        logger.error(f"基本検索エラー: {e}")
+        # 最後の手段：空の結果を返す
         return []
 
 def generate_ai_response_with_context(user_message, context_data, user_id):
