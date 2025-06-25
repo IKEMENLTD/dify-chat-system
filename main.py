@@ -777,7 +777,15 @@ def handle_line_message(event):
     try:
         user_id = f"line_{event.source.user_id}"
         user_message = event.message.text
-        
+
+        # 「ベテランAI」というキーワードが含まれていない場合は処理を中断
+        if "ベテランAI" not in user_message:
+            logger.info(f"LINEメッセージにはキーワードが含まれていなかったため、処理をスキップしました: {user_message}")
+            return 'OK'  # 何もせずに正常終了
+
+        # --- 以下、キーワードが含まれていた場合の処理 ---
+        logger.info(f"キーワード「ベテランAI」を検出。AI応答を生成します。")
+
         # キーワード抽出
         keywords = extract_keywords_with_ai(user_message)
         
@@ -807,10 +815,15 @@ def handle_line_message(event):
         
     except Exception as e:
         logger.error(f"LINE メッセージ処理エラー: {e}")
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text="申し訳ございません。エラーが発生しました。")
-        )
+        # エラー発生時もユーザーに返信
+        try:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="申し訳ございません。エラーが発生しました。")
+            )
+        except Exception as reply_error:
+            logger.error(f"LINE エラー返信失敗: {reply_error}")
+
 
 # =================================================================
 # 9. Chatwork Webhook
