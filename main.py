@@ -281,144 +281,142 @@ def extract_keywords_fallback(message):
     return keywords[:5]
 
 def search_database_for_context(keywords, user_id, limit=5):
-    """キーワードを使ってデータベースから関連する会話を検索"""
+    """キーワードを使ってデータベースから関連する会話を検索（大幅改善版）"""
     try:
         conn = get_db_connection()
         if not conn:
+            logger.error("データベース接続に失敗")
             return []
             
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        
-        if not keywords:
-            # キーワードがない場合は最新の会話を返す（両テーブルから）
-            try:
-                # conversationsテーブルから
-                cur.execute("""
-                    SELECT user_message, ai_response, created_at, keywords, 'conversations' as source
-                    FROM conversations 
-                    ORDER BY created_at DESC 
-                    LIMIT %s
-                """, (limit//2,))
-                conv_results = cur.fetchall()
-                
-                # external_chat_logsテーブルから
-                cur.execute("""
-                    SELECT message as user_message, raw_data as ai_response, created_at, 
-                           NULL as keywords, 'external_chat_logs' as source
-                    FROM external_chat_logs 
-                    ORDER BY created_at DESC 
-                    LIMIT %s
-                """, (limit//2,))
-                ext_results = cur.fetchall()
-                
-                all_results = [dict(row) for row in conv_results] + [dict(row) for row in ext_results]
-                cur.close()
-                conn.close()
-                return sorted(all_results, key=lambda x: x['created_at'], reverse=True)[:limit]
-            except Exception as e:
-                logger.error(f"初期検索エラー: {e}")
-                cur.close()
-                conn.close()
-                return []
-        
-        # 複数の検索方法を組み合わせる
         all_results = []
         
-        # 1. conversationsテーブルでの検索
+        # 1. まず external_chat_logs テーブルから検索（メインのデータソース）
         try:
-            # キーワード配列検索
-            query1 = """
-                SELECT user_message, ai_response, created_at, keywords, 1 as priority, 'conversations' as source
-                FROM conversations 
-                WHERE keywords && %s
-                ORDER BY created_at DESC 
-                LIMIT %s
-            """
-            cur.execute(query1, (keywords, limit))
-            conv_array_results = cur.fetchall()
-            all_results.extend([dict(row) for row in conv_array_results])
-            logger.info(f"conversations配列検索で {len(conv_array_results)} 件見つかりました")
-        except Exception as e:
-            logger.warning(f"conversations配列検索エラー: {e}")
-        
-        # 2. external_chat_logsテーブルでの検索
-        try:
-            search_conditions = []
-            search_params = []
-            
-            for keyword in keywords[:3]:
-                search_conditions.append("(message ILIKE %s OR raw_data::text ILIKE %s)")
-                search_params.extend([f'%{keyword}%', f'%{keyword}%'])
-            
-            if search_conditions:
-                query2 = f"""
-                    SELECT message as user_message, raw_data as ai_response, created_at, 
-                           NULL as keywords, 1 as priority, 'external_chat_logs' as source
+            # キーワードがある場合の検索
+            if keywords:
+                search_conditions = []
+                search_params = []
+                
+                # 各キーワードに対してOR条件を作成
+                for keyword in keywords:
+                    search_conditions.append("(message ILIKE %s OR raw_data::text ILIKE %s)")
+                    search_params.extend([f'%{keyword}%', f'%{keyword}%'])
+                
+                # クエリ実行
+                query = f"""
+                    SELECT 
+                        message as user_message, 
+                        raw_data::text as ai_response, 
+                        created_at, 
+                        user_name,
+                        'external_chat_logs' as source
                     FROM external_chat_logs 
                     WHERE ({' OR '.join(search_conditions)})
                     ORDER BY created_at DESC 
                     LIMIT %s
                 """
-                search_params.append(limit)
-                cur.execute(query2, search_params)
+                search_params.append(limit * 2)  # 多めに取得
+                
+                cur.execute(query, search_params)
                 ext_results = cur.fetchall()
-                all_results.extend([dict(row) for row in ext_results])
-                logger.info(f"external_chat_logs検索で {len(ext_results)} 件見つかりました")
-        except Exception as e:
-            logger.warning(f"external_chat_logs検索エラー: {e}")
-        
-        # 3. conversationsテーブルでのLIKE検索（フォールバック）
-        try:
-            search_conditions = []
-            search_params = []
+                
+                # 結果をフォーマット
+                for row in ext_results:
+                    result = dict(row)
+                    # raw_dataが辞書形式の場合は文字列化
+                    if isinstance(result.get('ai_response'), str):
+                        try:
+                            # JSON文字列の場合はそのまま使用
+                            result['ai_response'] = result['ai_response']
+                        except:
+                            pass
+                    all_results.append(result)
+                
+                logger.info(f"external_chat_logs検索: {len(ext_results)} 件見つかりました")
             
-            for keyword in keywords[:3]:
-                search_conditions.append("(user_message ILIKE %s OR ai_response ILIKE %s)")
-                search_params.extend([f'%{keyword}%', f'%{keyword}%'])
-            
-            if search_conditions:
-                query3 = f"""
-                    SELECT user_message, ai_response, created_at, keywords, 2 as priority, 'conversations' as source
-                    FROM conversations 
-                    WHERE ({' OR '.join(search_conditions)})
-                    AND NOT (keywords && %s)  -- 重複を避ける
+            # キーワードが無い場合は最新のデータを取得
+            else:
+                cur.execute("""
+                    SELECT 
+                        message as user_message, 
+                        raw_data::text as ai_response, 
+                        created_at, 
+                        user_name,
+                        'external_chat_logs' as source
+                    FROM external_chat_logs 
                     ORDER BY created_at DESC 
                     LIMIT %s
-                """
-                search_params.extend([keywords, limit])
-                cur.execute(query3, search_params)
-                conv_like_results = cur.fetchall()
-                all_results.extend([dict(row) for row in conv_like_results])
-                logger.info(f"conversationsLIKE検索で {len(conv_like_results)} 件見つかりました")
+                """, (limit,))
+                recent_results = cur.fetchall()
+                all_results.extend([dict(row) for row in recent_results])
+                logger.info(f"最新データ取得: {len(recent_results)} 件")
+                
         except Exception as e:
-            logger.warning(f"conversationsLIKE検索エラー: {e}")
+            logger.error(f"external_chat_logs検索エラー: {e}")
+        
+        # 2. conversations テーブルからも検索（補完的）
+        try:
+            if keywords:
+                search_conditions = []
+                search_params = []
+                
+                for keyword in keywords:
+                    search_conditions.append("(user_message ILIKE %s OR ai_response ILIKE %s)")
+                    search_params.extend([f'%{keyword}%', f'%{keyword}%'])
+                
+                if search_conditions:
+                    query = f"""
+                        SELECT 
+                            user_message, 
+                            ai_response, 
+                            created_at, 
+                            keywords,
+                            'conversations' as source
+                        FROM conversations 
+                        WHERE ({' OR '.join(search_conditions)})
+                        ORDER BY created_at DESC 
+                        LIMIT %s
+                    """
+                    search_params.append(limit)
+                    
+                    cur.execute(query, search_params)
+                    conv_results = cur.fetchall()
+                    all_results.extend([dict(row) for row in conv_results])
+                    logger.info(f"conversations検索: {len(conv_results)} 件見つかりました")
+        except Exception as e:
+            logger.warning(f"conversations検索エラー（スキップ）: {e}")
         
         cur.close()
         conn.close()
         
-        # 重複を除去し、優先度でソート
-        seen = set()
+        # 3. 結果の重複除去と整理
         unique_results = []
+        seen_messages = set()
+        
         for result in all_results:
-            # raw_dataがJSONの場合は文字列として扱う
-            ai_response = result.get('ai_response', '')
-            if isinstance(ai_response, dict):
-                ai_response = str(ai_response)
-            result['ai_response'] = ai_response
-            
-            key = (result['user_message'], result['created_at'])
-            if key not in seen:
-                seen.add(key)
+            message_key = result.get('user_message', '')[:50]  # 最初の50文字で重複判定
+            if message_key and message_key not in seen_messages:
+                seen_messages.add(message_key)
                 unique_results.append(result)
         
-        # 優先度と日時でソート
-        unique_results.sort(key=lambda x: (x.get('priority', 999), x['created_at']), reverse=True)
+        # 日付でソート（新しい順）
+        unique_results.sort(key=lambda x: x.get('created_at', ''), reverse=True)
         
-        logger.info(f"最終的に {len(unique_results)} 件の結果を返します")
-        return unique_results[:limit]
+        # 結果を制限
+        final_results = unique_results[:limit]
+        
+        logger.info(f"最終検索結果: {len(final_results)} 件を返します")
+        
+        # デバッグ用：見つかった結果の概要をログ出力
+        for i, result in enumerate(final_results):
+            msg_preview = (result.get('user_message', '') or '')[:30]
+            logger.info(f"結果{i+1}: {msg_preview}...")
+        
+        return final_results
         
     except Exception as e:
-        logger.error(f"データベース検索エラー: {e}")
+        logger.error(f"検索処理全体でエラー: {e}")
         return []
 
 def generate_ai_response_with_context(user_message, context_data, user_id):
@@ -438,24 +436,37 @@ def generate_ai_response_with_context(user_message, context_data, user_id):
         # 文脈情報をフォーマット
         context_text = ""
         if context_data:
-            context_text = "\n\n【参考情報（過去の会話から）】\n"
+            context_text = "\n\n【過去の会話から見つかった関連情報】\n"
             for i, item in enumerate(context_data, 1):
-                context_text += f"{i}. {item['created_at'].strftime('%Y-%m-%d')}: {item['user_message'][:100]}...\n"
-                context_text += f"   回答: {item['ai_response'][:200]}...\n\n"
+                created_at = item.get('created_at', 'Unknown')
+                if hasattr(created_at, 'strftime'):
+                    date_str = created_at.strftime('%Y-%m-%d %H:%M')
+                else:
+                    date_str = str(created_at)[:16]  # 文字列の場合は最初の16文字
+                
+                user_msg = item.get('user_message', '') or ''
+                ai_resp = item.get('ai_response', '') or ''
+                
+                context_text += f"【情報{i}】({date_str})\n"
+                context_text += f"質問: {user_msg[:150]}...\n"
+                context_text += f"内容: {ai_resp[:300]}...\n\n"
         
         prompt = f"""
-あなたは優秀なAIアシスタントです。ユーザーの質問に対して、過去の会話履歴を参考にしながら、適切で役立つ回答をしてください。
+あなたは優秀なAIアシスタントです。ユーザーの質問に対して、過去の会話履歴から見つかった具体的な情報を最大限活用して回答してください。
 
 ユーザーの質問: {user_message}
 
 {context_text}
 
-回答の指針:
-- 過去の情報が関連している場合は、それを参考にして回答してください
-- URL、ファイル名、具体的な情報が過去にあった場合は、それを含めて回答してください
-- 過去の情報が関連していない場合は、一般的な知識で回答してください
-- 親切で分かりやすい文章で回答してください
-- 必要に応じてMarkdown形式を使用してください
+重要な指針:
+1. **具体的な情報を優先**: URL、ファイル名、日付、場所などの具体的な情報があれば必ず含める
+2. **過去の情報を活用**: 見つかった過去の会話から関連する具体的な内容を抽出して回答に含める
+3. **直接的な回答**: 一般論ではなく、実際に見つかった情報を使って具体的に答える
+4. **URL抽出**: 過去のデータにURLやリンクがあれば必ず表示する
+5. **ファイル情報**: ファイル名、保存場所、作成日などがあれば明記する
+6. **見つからない場合のみ**: 本当に関連情報が見つからない場合のみ一般的な回答をする
+
+過去のデータに具体的な情報（URL、ファイル、場所など）がある場合は、それを最優先で回答に含めてください。
 
 回答:"""
 
