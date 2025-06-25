@@ -290,93 +290,108 @@ def search_database_for_context(keywords, user_id, limit=5):
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
         if not keywords:
-            # キーワードがない場合は最新の会話を返す
-            query = """
-                SELECT user_message, ai_response, created_at, keywords
-                FROM conversations 
-                ORDER BY created_at DESC 
-                LIMIT %s
-            """
-            cur.execute(query, (limit,))
-            results = cur.fetchall()
-            cur.close()
-            conn.close()
-            return [dict(row) for row in results]
+            # キーワードがない場合は最新の会話を返す（両テーブルから）
+            try:
+                # conversationsテーブルから
+                cur.execute("""
+                    SELECT user_message, ai_response, created_at, keywords, 'conversations' as source
+                    FROM conversations 
+                    ORDER BY created_at DESC 
+                    LIMIT %s
+                """, (limit//2,))
+                conv_results = cur.fetchall()
+                
+                # external_chat_logsテーブルから
+                cur.execute("""
+                    SELECT message as user_message, raw_data as ai_response, created_at, 
+                           NULL as keywords, 'external_chat_logs' as source
+                    FROM external_chat_logs 
+                    ORDER BY created_at DESC 
+                    LIMIT %s
+                """, (limit//2,))
+                ext_results = cur.fetchall()
+                
+                all_results = [dict(row) for row in conv_results] + [dict(row) for row in ext_results]
+                cur.close()
+                conn.close()
+                return sorted(all_results, key=lambda x: x['created_at'], reverse=True)[:limit]
+            except Exception as e:
+                logger.error(f"初期検索エラー: {e}")
+                cur.close()
+                conn.close()
+                return []
         
         # 複数の検索方法を組み合わせる
         all_results = []
         
-        # 1. キーワード配列検索（PostgreSQL配列機能）
+        # 1. conversationsテーブルでの検索
         try:
+            # キーワード配列検索
             query1 = """
-                SELECT user_message, ai_response, created_at, keywords, 1 as priority
+                SELECT user_message, ai_response, created_at, keywords, 1 as priority, 'conversations' as source
                 FROM conversations 
                 WHERE keywords && %s
                 ORDER BY created_at DESC 
                 LIMIT %s
             """
             cur.execute(query1, (keywords, limit))
-            array_results = cur.fetchall()
-            all_results.extend([dict(row) for row in array_results])
-            logger.info(f"配列検索で {len(array_results)} 件見つかりました")
+            conv_array_results = cur.fetchall()
+            all_results.extend([dict(row) for row in conv_array_results])
+            logger.info(f"conversations配列検索で {len(conv_array_results)} 件見つかりました")
         except Exception as e:
-            logger.warning(f"配列検索エラー: {e}")
+            logger.warning(f"conversations配列検索エラー: {e}")
         
-        # 2. LIKE検索（フォールバック）
-        search_conditions = []
-        search_params = []
-        
-        for keyword in keywords[:3]:  # 最大3つのキーワード
-            search_conditions.append("(user_message ILIKE %s OR ai_response ILIKE %s)")
-            search_params.extend([f'%{keyword}%', f'%{keyword}%'])
-        
-        if search_conditions:
-            query2 = f"""
-                SELECT user_message, ai_response, created_at, keywords, 2 as priority
-                FROM conversations 
-                WHERE ({' OR '.join(search_conditions)})
-                AND NOT (keywords && %s)  -- 重複を避ける
-                ORDER BY created_at DESC 
-                LIMIT %s
-            """
-            search_params.extend([keywords, limit])
+        # 2. external_chat_logsテーブルでの検索
+        try:
+            search_conditions = []
+            search_params = []
             
-            try:
+            for keyword in keywords[:3]:
+                search_conditions.append("(message ILIKE %s OR raw_data::text ILIKE %s)")
+                search_params.extend([f'%{keyword}%', f'%{keyword}%'])
+            
+            if search_conditions:
+                query2 = f"""
+                    SELECT message as user_message, raw_data as ai_response, created_at, 
+                           NULL as keywords, 1 as priority, 'external_chat_logs' as source
+                    FROM external_chat_logs 
+                    WHERE ({' OR '.join(search_conditions)})
+                    ORDER BY created_at DESC 
+                    LIMIT %s
+                """
+                search_params.append(limit)
                 cur.execute(query2, search_params)
-                like_results = cur.fetchall()
-                all_results.extend([dict(row) for row in like_results])
-                logger.info(f"LIKE検索で {len(like_results)} 件見つかりました")
-            except Exception as e:
-                logger.warning(f"LIKE検索エラー: {e}")
+                ext_results = cur.fetchall()
+                all_results.extend([dict(row) for row in ext_results])
+                logger.info(f"external_chat_logs検索で {len(ext_results)} 件見つかりました")
+        except Exception as e:
+            logger.warning(f"external_chat_logs検索エラー: {e}")
         
-        # 3. 部分一致検索（最後の手段）
-        if not all_results:
-            try:
-                partial_conditions = []
-                partial_params = []
-                
-                for keyword in keywords:
-                    # キーワードを文字単位で分割
-                    for char in keyword:
-                        if len(char) > 1:  # 1文字以上
-                            partial_conditions.append("(user_message ILIKE %s OR ai_response ILIKE %s)")
-                            partial_params.extend([f'%{char}%', f'%{char}%'])
-                
-                if partial_conditions:
-                    query3 = f"""
-                        SELECT user_message, ai_response, created_at, keywords, 3 as priority
-                        FROM conversations 
-                        WHERE ({' OR '.join(partial_conditions[:6])})  -- 最大6条件
-                        ORDER BY created_at DESC 
-                        LIMIT %s
-                    """
-                    partial_params.append(limit)
-                    cur.execute(query3, partial_params)
-                    partial_results = cur.fetchall()
-                    all_results.extend([dict(row) for row in partial_results])
-                    logger.info(f"部分検索で {len(partial_results)} 件見つかりました")
-            except Exception as e:
-                logger.warning(f"部分検索エラー: {e}")
+        # 3. conversationsテーブルでのLIKE検索（フォールバック）
+        try:
+            search_conditions = []
+            search_params = []
+            
+            for keyword in keywords[:3]:
+                search_conditions.append("(user_message ILIKE %s OR ai_response ILIKE %s)")
+                search_params.extend([f'%{keyword}%', f'%{keyword}%'])
+            
+            if search_conditions:
+                query3 = f"""
+                    SELECT user_message, ai_response, created_at, keywords, 2 as priority, 'conversations' as source
+                    FROM conversations 
+                    WHERE ({' OR '.join(search_conditions)})
+                    AND NOT (keywords && %s)  -- 重複を避ける
+                    ORDER BY created_at DESC 
+                    LIMIT %s
+                """
+                search_params.extend([keywords, limit])
+                cur.execute(query3, search_params)
+                conv_like_results = cur.fetchall()
+                all_results.extend([dict(row) for row in conv_like_results])
+                logger.info(f"conversationsLIKE検索で {len(conv_like_results)} 件見つかりました")
+        except Exception as e:
+            logger.warning(f"conversationsLIKE検索エラー: {e}")
         
         cur.close()
         conn.close()
@@ -385,6 +400,12 @@ def search_database_for_context(keywords, user_id, limit=5):
         seen = set()
         unique_results = []
         for result in all_results:
+            # raw_dataがJSONの場合は文字列として扱う
+            ai_response = result.get('ai_response', '')
+            if isinstance(ai_response, dict):
+                ai_response = str(ai_response)
+            result['ai_response'] = ai_response
+            
             key = (result['user_message'], result['created_at'])
             if key not in seen:
                 seen.add(key)
@@ -878,25 +899,43 @@ def debug_conversations():
             
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        # 全ての会話を取得（最新10件）
+        # conversationsテーブルから取得
         cur.execute("""
-            SELECT id, user_id, user_message, ai_response, keywords, created_at
+            SELECT id, user_id, user_message, ai_response, keywords, created_at, 'conversations' as source
             FROM conversations 
             ORDER BY created_at DESC 
             LIMIT 10
         """)
         conversations = [dict(row) for row in cur.fetchall()]
         
+        # external_chat_logsテーブルから取得
+        cur.execute("""
+            SELECT id, user_id, user_name, message, raw_data, created_at, 'external_chat_logs' as source
+            FROM external_chat_logs 
+            ORDER BY created_at DESC 
+            LIMIT 10
+        """)
+        external_logs = [dict(row) for row in cur.fetchall()]
+        
         # 件数も取得
         cur.execute("SELECT COUNT(*) as total FROM conversations")
-        total = cur.fetchone()['total']
+        conv_total = cur.fetchone()['total']
+        
+        cur.execute("SELECT COUNT(*) as total FROM external_chat_logs")
+        ext_total = cur.fetchone()['total']
         
         cur.close()
         conn.close()
         
         return jsonify({
-            'total_conversations': total,
-            'recent_conversations': conversations
+            'conversations_table': {
+                'total': conv_total,
+                'recent': conversations
+            },
+            'external_chat_logs_table': {
+                'total': ext_total,
+                'recent': external_logs
+            }
         })
         
     except Exception as e:
