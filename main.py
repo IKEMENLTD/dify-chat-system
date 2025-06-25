@@ -14,6 +14,8 @@ import hashlib
 import hmac
 from urllib.parse import urlparse
 import threading
+import dateparser
+from dateutil.relativedelta import relativedelta
 
 # LINE SDK
 from linebot import LineBotApi, WebhookHandler
@@ -770,46 +772,112 @@ def handle_line_message(event):
     """LINEメッセージハンドラ"""
     try:
         user_id = f"line_{event.source.user_id}"
-        user_message = event.message.text
+        # メッセージの前後の不要な空白を削除
+        user_message = event.message.text.strip()
+        
+        # 宛先IDを取得（グループチャットにも対応）
+        target_id = event.source.user_id
+        if hasattr(event.source, 'group_id'):
+            target_id = event.source.group_id
 
-        # 「ベテランAI」というキーワードが含まれていない場合は処理を中断
-        if "ベテランAI" not in user_message:
-            logger.info(f"LINEメッセージにはキーワードが含まれていなかったため、処理をスキップしました: {user_message}")
-            return 'OK'  # 何もせずに正常終了
+        # --- リマインダー機能 ---
+        if user_message.startswith('リマインダー'):
+            # "リマインダー" とだけ送られた場合は使い方を案内
+            if user_message == 'リマインダー':
+                reply_text = """リマインダー機能です。
+「リマインダー 明日15時 会議」のように、内容と日時を教えてください。
+登録済みの予定は「一覧」と送ると確認できます。"""
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+                return 'OK'
 
-        # --- 以下、キーワードが含まれていた場合の処理 ---
-        logger.info(f"キーワード「ベテランAI」を検出。AI応答を生成します。")
+            # 「リマインダー」の後のテキストを解析
+            reminder_text = user_message.replace('リマインダー', '', 1).strip()
+            
+            # 日本語の日時を解析
+            parsed_datetime = dateparser.parse(reminder_text, languages=['ja'])
+            
+            if parsed_datetime:
+                # タイムゾーンを日本時間に設定
+                now = datetime.now(pytz.timezone('Asia/Tokyo'))
+                if parsed_datetime.tzinfo is None:
+                    parsed_datetime = pytz.timezone('Asia/Tokyo').localize(parsed_datetime)
+                
+                # もし過去の日時なら、未来の日付になるように調整
+                if parsed_datetime < now:
+                    parsed_datetime += relativedelta(days=1)
+                    if parsed_datetime < now:
+                         parsed_datetime += relativedelta(years=1, days=-1)
 
-        # キーワード抽出
-        keywords = extract_keywords_with_ai(user_message)
-        
-        # データベース検索
-        context_data = search_database_for_context(keywords, user_id)
-        
-        # AI回答生成
-        ai_response = generate_ai_response_with_context(user_message, context_data, user_id)
-        
-        # データベースに保存
-        save_conversation_to_db(
-            user_id=user_id,
-            conversation_id=None,
-            user_message=user_message,
-            ai_response=ai_response,
-            keywords=keywords,
-            context_used=context_data,
-            response_time_ms=0,
-            source_platform='line'
-        )
-        
-        # LINE返信
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=ai_response)
-        )
-        
+                # データベースに保存
+                conn = get_db_connection()
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO reminders (user_id, target_id, reminder_content, due_at) VALUES (%s, %s, %s, %s)",
+                    (user_id, f"line_{target_id}", reminder_text, parsed_datetime)
+                )
+                conn.commit()
+                cur.close()
+                conn.close()
+                
+                reply_text = f"了解しました！\n【{reminder_text}】を\n{parsed_datetime.strftime('%Y年%m月%d日 %H:%M')}にお知らせします。"
+            else:
+                reply_text = "すみません、日時をうまく読み取れませんでした。「明日15時」「毎週金曜朝8時」のように具体的に教えてください。"
+            
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+            return 'OK'
+
+        # --- 一覧表示機能 ---
+        elif user_message == '一覧':
+            conn = get_db_connection()
+            # 結果を辞書形式で受け取る
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+
+            cur.execute(
+                "SELECT id, reminder_content, due_at FROM reminders WHERE target_id = %s AND status = 'active' ORDER BY due_at ASC LIMIT 10",
+                (f"line_{target_id}",)
+            )
+            reminders = cur.fetchall()
+            cur.close()
+            conn.close()
+            
+            if not reminders:
+                reply_text = "登録されているリマインダーはありません。"
+            else:
+                reply_text = "【登録済みのリマインダー】\n\n"
+                for r in reminders:
+                    # タイムゾーンを日本時間に変換して表示
+                    due_at_jst = r['due_at'].astimezone(pytz.timezone('Asia/Tokyo'))
+                    reply_text += f"・{r['reminder_content']} ({due_at_jst.strftime('%m/%d %H:%M')})\n"
+            
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+            return 'OK'
+
+        # --- ベテランAI機能（既存の機能） ---
+        elif "ベテランAI" in user_message:
+            logger.info(f"キーワード「ベテランAI」を検出。AI応答を生成します。")
+            keywords = extract_keywords_with_ai(user_message)
+            context_data = search_database_for_context(keywords, user_id)
+            ai_response = generate_ai_response_with_context(user_message, context_data, user_id)
+            
+            save_conversation_to_db(
+                user_id=user_id,
+                conversation_id=None,
+                user_message=user_message,
+                ai_response=ai_response,
+                keywords=keywords,
+                context_used=context_data,
+                response_time_ms=0,
+                source_platform='line'
+            )
+            
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=ai_response)
+            )
+            return 'OK'
+
     except Exception as e:
         logger.error(f"LINE メッセージ処理エラー: {e}")
-        # エラー発生時もユーザーに返信
         try:
             line_bot_api.reply_message(
                 event.reply_token,
@@ -818,6 +886,7 @@ def handle_line_message(event):
         except Exception as reply_error:
             logger.error(f"LINE エラー返信失敗: {reply_error}")
 
+        
 
 # =================================================================
 # 9. Chatwork Webhook
