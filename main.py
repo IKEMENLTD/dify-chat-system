@@ -281,28 +281,22 @@ def extract_keywords_fallback(message):
     return keywords[:5]
 
 def search_database_for_context(keywords, user_id, limit=5):
-    """完璧検索システムのメインエントリーポイント"""
+    """データベースから文脈情報を検索する"""
     try:
-        # 完璧検索を使用
-        results = search_database_for_context_perfect(keywords, user_id, limit)
+        # 基本検索を直接呼び出すように修正
+        logger.info(f"基本検索を開始します。キーワード: {keywords}")
+        results = search_database_basic_fallback(keywords, user_id, limit)
         
-        if results:
-            logger.info(f"完璧検索成功: {len(results)} 件")
-            # スコア情報をログ出力（デバッグ用）
-            for i, result in enumerate(results[:3]):
-                score = result.get('final_score', 0)
-                msg_preview = (result.get('user_message', '') or '')[:30]
-                logger.info(f"結果{i+1}(スコア:{score:.2f}): {msg_preview}...")
-            return results
-        else:
-            # フォールバック：基本検索
-            logger.warning("完璧検索で結果なし、基本検索にフォールバック")
-            return search_database_basic_fallback(keywords, user_id, limit)
+        if not results:
+            logger.info("基本検索では関連情報が見つかりませんでした。")
+        
+        return results
             
     except Exception as e:
-        logger.error(f"完璧検索システムエラー: {e}")
-        # 必ずフォールバック検索を実行
-        return search_database_basic_fallback(keywords, user_id, limit)
+        # 検索処理全体でエラーが発生した場合のログ
+        logger.error(f"データベース検索中に予期せぬエラーが発生しました: {e}")
+        # エラーが発生した場合でも処理が止まらないよう空のリストを返す
+        return []
 
 def search_database_basic_fallback(keywords, user_id, limit=5):
     """基本検索（絶対に失敗しないフォールバック）"""
