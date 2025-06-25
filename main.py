@@ -290,36 +290,111 @@ def search_database_for_context(keywords, user_id, limit=5):
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
         if not keywords:
-            return []
+            # キーワードがない場合は最新の会話を返す
+            query = """
+                SELECT user_message, ai_response, created_at, keywords
+                FROM conversations 
+                ORDER BY created_at DESC 
+                LIMIT %s
+            """
+            cur.execute(query, (limit,))
+            results = cur.fetchall()
+            cur.close()
+            conn.close()
+            return [dict(row) for row in results]
         
-        # シンプルなLIKE検索（互換性重視）
+        # 複数の検索方法を組み合わせる
+        all_results = []
+        
+        # 1. キーワード配列検索（PostgreSQL配列機能）
+        try:
+            query1 = """
+                SELECT user_message, ai_response, created_at, keywords, 1 as priority
+                FROM conversations 
+                WHERE keywords && %s
+                ORDER BY created_at DESC 
+                LIMIT %s
+            """
+            cur.execute(query1, (keywords, limit))
+            array_results = cur.fetchall()
+            all_results.extend([dict(row) for row in array_results])
+            logger.info(f"配列検索で {len(array_results)} 件見つかりました")
+        except Exception as e:
+            logger.warning(f"配列検索エラー: {e}")
+        
+        # 2. LIKE検索（フォールバック）
         search_conditions = []
-        search_params = [user_id]
+        search_params = []
         
         for keyword in keywords[:3]:  # 最大3つのキーワード
             search_conditions.append("(user_message ILIKE %s OR ai_response ILIKE %s)")
             search_params.extend([f'%{keyword}%', f'%{keyword}%'])
         
-        if not search_conditions:
-            return []
+        if search_conditions:
+            query2 = f"""
+                SELECT user_message, ai_response, created_at, keywords, 2 as priority
+                FROM conversations 
+                WHERE ({' OR '.join(search_conditions)})
+                AND NOT (keywords && %s)  -- 重複を避ける
+                ORDER BY created_at DESC 
+                LIMIT %s
+            """
+            search_params.extend([keywords, limit])
             
-        query = f"""
-            SELECT user_message, ai_response, created_at, keywords
-            FROM conversations 
-            WHERE user_id = %s 
-            AND ({' OR '.join(search_conditions)})
-            ORDER BY created_at DESC 
-            LIMIT %s
-        """
+            try:
+                cur.execute(query2, search_params)
+                like_results = cur.fetchall()
+                all_results.extend([dict(row) for row in like_results])
+                logger.info(f"LIKE検索で {len(like_results)} 件見つかりました")
+            except Exception as e:
+                logger.warning(f"LIKE検索エラー: {e}")
         
-        search_params.append(limit)
-        cur.execute(query, search_params)
-        results = cur.fetchall()
+        # 3. 部分一致検索（最後の手段）
+        if not all_results:
+            try:
+                partial_conditions = []
+                partial_params = []
+                
+                for keyword in keywords:
+                    # キーワードを文字単位で分割
+                    for char in keyword:
+                        if len(char) > 1:  # 1文字以上
+                            partial_conditions.append("(user_message ILIKE %s OR ai_response ILIKE %s)")
+                            partial_params.extend([f'%{char}%', f'%{char}%'])
+                
+                if partial_conditions:
+                    query3 = f"""
+                        SELECT user_message, ai_response, created_at, keywords, 3 as priority
+                        FROM conversations 
+                        WHERE ({' OR '.join(partial_conditions[:6])})  -- 最大6条件
+                        ORDER BY created_at DESC 
+                        LIMIT %s
+                    """
+                    partial_params.append(limit)
+                    cur.execute(query3, partial_params)
+                    partial_results = cur.fetchall()
+                    all_results.extend([dict(row) for row in partial_results])
+                    logger.info(f"部分検索で {len(partial_results)} 件見つかりました")
+            except Exception as e:
+                logger.warning(f"部分検索エラー: {e}")
         
         cur.close()
         conn.close()
         
-        return [dict(row) for row in results]
+        # 重複を除去し、優先度でソート
+        seen = set()
+        unique_results = []
+        for result in all_results:
+            key = (result['user_message'], result['created_at'])
+            if key not in seen:
+                seen.add(key)
+                unique_results.append(result)
+        
+        # 優先度と日時でソート
+        unique_results.sort(key=lambda x: (x.get('priority', 999), x['created_at']), reverse=True)
+        
+        logger.info(f"最終的に {len(unique_results)} 件の結果を返します")
+        return unique_results[:limit]
         
     except Exception as e:
         logger.error(f"データベース検索エラー: {e}")
@@ -757,7 +832,7 @@ def chatwork_webhook():
                 keywords = extract_keywords_with_ai(body)
                 
                 # データベース検索
-                context_data = search_database_for_context(keywords, user_id)
+                context_data = search_database_for_context(keywords, user_id, limit=10)  # より多くの結果を取得
                 
                 # AI回答生成
                 ai_response = generate_ai_response_with_context(body, context_data, user_id)
@@ -791,8 +866,65 @@ def chatwork_webhook():
         return 'Error', 500
 
 # =================================================================
-# 10. アプリケーション起動
+# 11. デバッグ・管理用API
 # =================================================================
+@app.route('/api/debug/conversations')
+def debug_conversations():
+    """デバッグ用：データベース内の会話を確認"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'error': 'データベース接続エラー'}), 500
+            
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # 全ての会話を取得（最新10件）
+        cur.execute("""
+            SELECT id, user_id, user_message, ai_response, keywords, created_at
+            FROM conversations 
+            ORDER BY created_at DESC 
+            LIMIT 10
+        """)
+        conversations = [dict(row) for row in cur.fetchall()]
+        
+        # 件数も取得
+        cur.execute("SELECT COUNT(*) as total FROM conversations")
+        total = cur.fetchone()['total']
+        
+        cur.close()
+        conn.close()
+        
+        return jsonify({
+            'total_conversations': total,
+            'recent_conversations': conversations
+        })
+        
+    except Exception as e:
+        logger.error(f"デバッグ取得エラー: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/debug/search/<query>')
+def debug_search(query):
+    """デバッグ用：検索処理の詳細を確認"""
+    try:
+        # キーワード抽出
+        keywords = extract_keywords_with_ai(query)
+        logger.info(f"デバッグ - 抽出キーワード: {keywords}")
+        
+        # データベース検索
+        user_id = "debug_user"  # デバッグ用
+        context_data = search_database_for_context(keywords, user_id, limit=10)
+        
+        return jsonify({
+            'query': query,
+            'extracted_keywords': keywords,
+            'search_results_count': len(context_data),
+            'search_results': context_data
+        })
+        
+    except Exception as e:
+        logger.error(f"デバッグ検索エラー: {e}")
+        return jsonify({'error': str(e)}), 500
 def create_app():
     """アプリケーションファクトリ"""
     # データベース初期化
