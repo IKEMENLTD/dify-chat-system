@@ -154,6 +154,29 @@ def get_db_connection():
         logger.error(f"データベース接続エラー: {e}")
         return None
 
+def get_available_claude_model():
+    """利用可能なClaudeモデルを取得"""
+    # 2025年6月現在利用可能なモデル（優先順位順）
+    models = [
+        "claude-3-5-sonnet-20241022",  # Claude 3.5 Sonnet (安定版)
+        "claude-3-5-haiku-20241022",   # Claude 3.5 Haiku (高速)
+        "claude-3-opus-20240229",      # Claude 3 Opus (高性能)
+        "claude-3-sonnet-20240229",    # Claude 3 Sonnet (バランス)
+        "claude-3-haiku-20240307"      # Claude 3 Haiku (高速)
+    ]
+    return models[0]  # 現在最も安定したモデルを返す
+
+def get_claude4_model():
+    """Claude 4モデルを取得（利用可能な場合）"""
+    # Claude 4は段階的リリース中のため、フォールバック付きで実装
+    claude4_models = [
+        "claude-4-sonnet-20250514",   # Claude Sonnet 4 (推測されるモデル名)
+        "claude-4-opus-20250514",     # Claude Opus 4 (推測されるモデル名)
+        "claude-sonnet-4",            # 可能性のある省略形
+        "claude-opus-4"               # 可能性のある省略形
+    ]
+    return claude4_models[0]
+
 def extract_keywords_with_ai(message):
     """Claude APIを使ってメッセージからキーワードを抽出"""
     try:
@@ -180,39 +203,61 @@ def extract_keywords_with_ai(message):
 レスポンスはJSONのみで、説明文は不要です。
 """
 
-        data = {
-            "model": "claude-3-haiku-20240307",
-            "max_tokens": 200,
-            "messages": [
-                {
-                    "role": "user", 
-                    "content": prompt
-                }
-            ]
-        }
+        # Claude 4を試行、失敗時は Claude 3.5にフォールバック
+        models_to_try = [
+            "claude-4-sonnet-20250514",    # Claude Sonnet 4 (最新)
+            "claude-3-5-sonnet-20241022"   # Claude 3.5 Sonnet (フォールバック)
+        ]
         
-        response = requests.post(
-            'https://api.anthropic.com/v1/messages',
-            headers=headers,
-            json=data,
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
-            content = result['content'][0]['text']
-            
-            # JSONを抽出
+        for model in models_to_try:
             try:
-                keywords_data = json.loads(content)
-                return keywords_data.get('keywords', [])
-            except json.JSONDecodeError:
-                # JSONパースに失敗した場合、正規表現でキーワードを抽出
-                matches = re.findall(r'"([^"]+)"', content)
-                return matches[:5]  # 最大5個
-        else:
-            logger.warning(f"Claude API エラー: {response.status_code}")
-            return extract_keywords_fallback(message)
+                data = {
+                    "model": model,
+                    "max_tokens": 300,
+                    "temperature": 0.1,  # 一貫性重視
+                    "messages": [
+                        {
+                            "role": "user", 
+                            "content": prompt
+                        }
+                    ]
+                }
+                
+                response = requests.post(
+                    'https://api.anthropic.com/v1/messages',
+                    headers=headers,
+                    json=data,
+                    timeout=15
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    content = result['content'][0]['text']
+                    
+                    # JSONを抽出
+                    try:
+                        keywords_data = json.loads(content)
+                        logger.info(f"キーワード抽出成功 (モデル: {model})")
+                        return keywords_data.get('keywords', [])
+                    except json.JSONDecodeError:
+                        # JSONパースに失敗した場合、正規表現でキーワードを抽出
+                        matches = re.findall(r'"([^"]+)"', content)
+                        return matches[:5]  # 最大5個
+                elif response.status_code == 404:
+                    # モデルが見つからない場合、次のモデルを試行
+                    logger.warning(f"モデル {model} が利用できません。次のモデルを試行中...")
+                    continue
+                else:
+                    logger.warning(f"Claude API エラー: {response.status_code} (モデル: {model})")
+                    continue
+                    
+            except Exception as model_error:
+                logger.warning(f"モデル {model} でエラー: {model_error}")
+                continue
+        
+        # 全てのモデルで失敗した場合
+        logger.warning("全てのClaudeモデルで失敗。フォールバック処理を使用")
+        return extract_keywords_fallback(message)
             
     except Exception as e:
         logger.error(f"キーワード抽出エラー: {e}")
@@ -318,30 +363,65 @@ def generate_ai_response_with_context(user_message, context_data, user_id):
 
 回答:"""
 
-        data = {
-            "model": "claude-3-sonnet-20240229",
-            "max_tokens": 2000,
-            "messages": [
-                {
-                    "role": "user", 
-                    "content": prompt
+        # Claude 4を優先的に試行、失敗時はフォールバック
+        models_to_try = [
+            {
+                "model": "claude-4-sonnet-20250514",  # Claude Sonnet 4
+                "max_tokens": 8000,
+                "temperature": 0.3
+            },
+            {
+                "model": "claude-4-opus-20250514",    # Claude Opus 4
+                "max_tokens": 8000,
+                "temperature": 0.2
+            },
+            {
+                "model": "claude-3-5-sonnet-20241022", # Claude 3.5 Sonnet (フォールバック)
+                "max_tokens": 4000,
+                "temperature": 0.3
+            }
+        ]
+        
+        for model_config in models_to_try:
+            try:
+                data = {
+                    "model": model_config["model"],
+                    "max_tokens": model_config["max_tokens"],
+                    "temperature": model_config["temperature"],
+                    "messages": [
+                        {
+                            "role": "user", 
+                            "content": prompt
+                        }
+                    ]
                 }
-            ]
-        }
+                
+                response = requests.post(
+                    'https://api.anthropic.com/v1/messages',
+                    headers=headers,
+                    json=data,
+                    timeout=60  # Claude 4は処理時間が長い可能性
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    logger.info(f"AI回答生成成功 (モデル: {model_config['model']})")
+                    return result['content'][0]['text']
+                elif response.status_code == 404:
+                    # モデルが見つからない場合、次のモデルを試行
+                    logger.warning(f"モデル {model_config['model']} が利用できません。次のモデルを試行中...")
+                    continue
+                else:
+                    logger.warning(f"Claude API エラー: {response.status_code} (モデル: {model_config['model']})")
+                    continue
+                    
+            except Exception as model_error:
+                logger.warning(f"モデル {model_config['model']} でエラー: {model_error}")
+                continue
         
-        response = requests.post(
-            'https://api.anthropic.com/v1/messages',
-            headers=headers,
-            json=data,
-            timeout=30
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
-            return result['content'][0]['text']
-        else:
-            logger.error(f"Claude API エラー: {response.status_code} - {response.text}")
-            return generate_fallback_response(user_message, context_data)
+        # 全てのモデルで失敗した場合
+        logger.error("全てのClaudeモデルで失敗。フォールバック回答を生成")
+        return generate_fallback_response(user_message, context_data)
             
     except Exception as e:
         logger.error(f"AI回答生成エラー: {e}")
@@ -380,6 +460,15 @@ def save_conversation_to_db(user_id, conversation_id, user_message, ai_response,
             
         cur = conn.cursor()
         
+        # context_usedのdatetime型をstring型に変換
+        context_used_json = None
+        if context_used:
+            # datetime型を文字列に変換
+            for item in context_used:
+                if isinstance(item.get('created_at'), datetime):
+                    item['created_at'] = item['created_at'].isoformat()
+            context_used_json = json.dumps(context_used, ensure_ascii=False)
+        
         query = """
             INSERT INTO conversations 
             (user_id, conversation_id, user_message, ai_response, keywords, context_used, response_time_ms, source_platform, created_at)
@@ -392,7 +481,7 @@ def save_conversation_to_db(user_id, conversation_id, user_message, ai_response,
             user_message,
             ai_response,
             keywords,
-            json.dumps(context_used, ensure_ascii=False) if context_used else None,
+            context_used_json,
             response_time_ms,
             source_platform,
             datetime.now()
@@ -573,12 +662,13 @@ def get_stats():
 # 8. LINE Webhook
 # =================================================================
 @app.route('/webhook/line', methods=['POST'])
+@app.route('/api/line/webhook', methods=['POST'])  # 追加パス
 def line_webhook():
     """LINE Webhook"""
     if not line_handler:
         return 'LINE not configured', 400
 
-    signature = request.headers['X-Line-Signature']
+    signature = request.headers.get('X-Line-Signature', '')
     body = request.get_data(as_text=True)
 
     try:
@@ -586,6 +676,9 @@ def line_webhook():
     except InvalidSignatureError:
         logger.error("LINE Webhook signature verification failed")
         return 'Invalid signature', 400
+    except Exception as e:
+        logger.error(f"LINE Webhook error: {e}")
+        return 'Error', 500
 
     return 'OK'
 
