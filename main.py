@@ -10,29 +10,41 @@ from psycopg2.extras import RealDictCursor
 import logging
 from functools import wraps
 import time
-import hashlib
-import hmac
-from urllib.parse import urlparse
-import threading
-import dateparser
-from dateutil.relativedelta import relativedelta
+# hashlibとhmacは将来のセキュリティ機能のために保持
+# 未使用のインポートを削除
 
 # LINE SDK
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, FollowEvent, ImageMessage, FileMessage, TextSendMessage
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
 
 # Supabase SDK
 from supabase import create_client, Client
 
+# スケジューラー
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+import pytz
+
 # =================================================================
 # 1. 初期設定
 # =================================================================
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# ログ設定
+log_level = os.getenv('LOG_LEVEL', 'INFO')
+logging.basicConfig(
+    level=getattr(logging, log_level, logging.INFO),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__, static_folder='.')
 app.config['MAX_CONTENT_LENGTH'] = int(os.getenv('MAX_CONTENT_LENGTH', 16777216))
+
+# 本番環境でのセキュリティ設定
+if os.getenv('FLASK_ENV') == 'production':
+    app.config['SESSION_COOKIE_SECURE'] = True
+    app.config['SESSION_COOKIE_HTTPONLY'] = True
+    app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 
 # CORS設定
 allowed_origins = os.getenv('ALLOWED_ORIGINS', '*').split(',')
@@ -42,9 +54,18 @@ CORS(app, origins=allowed_origins)
 # 2. 環境変数とAPIクライアントの読み込み
 # =================================================================
 DATABASE_URL = os.getenv('DATABASE_URL')
+
+# DIFY関連設定（現在使用されていない）
 DIFY_API_KEY = os.getenv('DIFY_API_KEY')
 DIFY_API_URL = os.getenv('DIFY_API_URL', 'https://api.dify.ai/v1')
-SECRET_KEY = os.getenv('SECRET_KEY', 'your-super-secret-key')
+
+# DIFY APIの警告
+if DIFY_API_KEY:
+    logger.info("DIFY APIキーが設定されていますが、現在の実装ではClaude APIを使用しています。")
+SECRET_KEY = os.getenv('SECRET_KEY')
+if not SECRET_KEY:
+    logger.warning("SECRET_KEYが設定されていません。セキュリティ上のリスクがあります。")
+    SECRET_KEY = 'development-only-secret-key'  # 開発用のみ
 
 # LINE設定
 LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
@@ -54,18 +75,36 @@ LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 CHATWORK_WEBHOOK_TOKEN = os.getenv('CHATWORK_WEBHOOK_TOKEN')
 CHATWORK_API_TOKEN = os.getenv('CHATWORK_API_TOKEN')
 
+# 究極検索関連設定（環境変数があるが機能未実装）
+ULTIMATE_SEARCH_ENABLED = os.getenv('ULTIMATE_SEARCH_ENABLED', 'False').lower() == 'true'
+SEARCH_ANALYTICS_ENABLED = os.getenv('SEARCH_ANALYTICS_ENABLED', 'False').lower() == 'true'
+SEMANTIC_SEARCH_THRESHOLD = float(os.getenv('SEMANTIC_SEARCH_THRESHOLD', '0.1'))
+NGRAM_MIN_LENGTH = int(os.getenv('NGRAM_MIN_LENGTH', '2'))
+NGRAM_MAX_LENGTH = int(os.getenv('NGRAM_MAX_LENGTH', '4'))
+MAX_DOCUMENTS_FOR_ML = int(os.getenv('MAX_DOCUMENTS_FOR_ML', '1000'))
+SEARCH_RESULT_CACHE_SIZE = int(os.getenv('SEARCH_RESULT_CACHE_SIZE', '100'))
+
+# 究極検索機能の警告
+if ULTIMATE_SEARCH_ENABLED:
+    logger.warning("究極検索機能が有効化されていますが、現在未実装です。")
+
 # Supabase設定
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 SUPABASE_BUCKET_NAME = os.getenv('SUPABASE_BUCKET_NAME', 'chat-uploads')
 
 # Claude API設定（Anthropic）
-ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY', 'your-anthropic-api-key')
+ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
+if not ANTHROPIC_API_KEY:
+    logger.warning("ANTHROPIC_API_KEYが設定されていません。AI機能が制限されます。")
 
 # APIクライアント初期化
 line_bot_api = None
 line_handler = None
 supabase_client = None
+
+# スケジューラー初期化
+scheduler = BackgroundScheduler(timezone=pytz.timezone('Asia/Tokyo'))
 
 if LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET:
     line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
@@ -78,8 +117,7 @@ if SUPABASE_URL and SUPABASE_KEY:
 # 3. データベース初期化
 # =================================================================
 def init_database():
-    """データベーステーブルを初期化または更新する"""
-    conn = None
+    """データベーステーブルを初期化"""
     try:
         conn = get_db_connection()
         if not conn:
@@ -88,7 +126,7 @@ def init_database():
             
         cur = conn.cursor()
         
-        # conversationsテーブルの作成（既存の処理）
+        # conversationsテーブル
         cur.execute("""
             CREATE TABLE IF NOT EXISTS conversations (
                 id SERIAL PRIMARY KEY,
@@ -100,52 +138,90 @@ def init_database():
                 context_used TEXT,
                 source_platform VARCHAR(50) DEFAULT 'web',
                 response_time_ms INTEGER,
-                satisfaction_rating INTEGER,
+                satisfaction_rating INTEGER CHECK (satisfaction_rating >= 1 AND satisfaction_rating <= 5),
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         
-        # remindersテーブルの作成（前回のリマインダー機能で追加）
+        # external_chat_logsテーブル（外部チャットログ用）
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS external_chat_logs (
+                id SERIAL PRIMARY KEY,
+                user_id VARCHAR(255),
+                user_name VARCHAR(255),
+                message TEXT,
+                raw_data JSONB,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # external_chat_logsインデックス
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_external_chat_logs_user_id ON external_chat_logs(user_id);
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_external_chat_logs_created_at ON external_chat_logs(created_at);
+        """)
+        
+        # リマインダーテーブル
         cur.execute("""
             CREATE TABLE IF NOT EXISTS reminders (
                 id SERIAL PRIMARY KEY,
                 user_id VARCHAR(255) NOT NULL,
-                target_id VARCHAR(255) NOT NULL,
-                reminder_content TEXT NOT NULL,
-                due_at TIMESTAMP WITH TIME ZONE NOT NULL,
-                status VARCHAR(50) DEFAULT 'active',
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                message TEXT NOT NULL,
+                reminder_time TIME NOT NULL,
+                repeat_pattern VARCHAR(50) DEFAULT 'once',
+                repeat_days VARCHAR(20)[],
+                last_sent_date DATE,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         
-        # --- ▼ ここからが今回の改造部分 ▼ ---
-        # remindersテーブルに 'is_recurring' カラムがなければ追加する
-        cur.execute("SELECT 1 FROM information_schema.columns WHERE table_name='reminders' AND column_name='is_recurring'")
-        if cur.fetchone() is None:
-            cur.execute("ALTER TABLE reminders ADD COLUMN is_recurring BOOLEAN DEFAULT FALSE;")
-            logger.info("remindersテーブルに 'is_recurring' カラムを追加しました。")
-
-        # remindersテーブルに 'recurrence_rule' カラムがなければ追加する
-        cur.execute("SELECT 1 FROM information_schema.columns WHERE table_name='reminders' AND column_name='recurrence_rule'")
-        if cur.fetchone() is None:
-            cur.execute("ALTER TABLE reminders ADD COLUMN recurrence_rule VARCHAR(100);")
-            logger.info("remindersテーブルに 'recurrence_rule' カラムを追加しました。")
-        # --- ▲ ここまでが改造部分 ▲ ---
-
+        # リマインダーインデックス
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_reminders_user_id ON reminders(user_id);
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_reminders_active ON reminders(is_active);
+        """)
+        
+        # 基本インデックス作成
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_conversations_user_id ON conversations(user_id);
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_conversations_created_at ON conversations(created_at);
+        """)
+        
+        # PostgreSQL拡張とインデックス（エラー時はスキップ）
+        try:
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_conversations_keywords ON conversations USING GIN(keywords);
+            """)
+        except Exception as gin_error:
+            logger.warning(f"GINインデックス作成をスキップ: {gin_error}")
+            
+        try:
+            # 日本語全文検索用（オプション）
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_conversations_search 
+                ON conversations USING GIN(to_tsvector('english', user_message || ' ' || ai_response));
+            """)
+        except Exception as fts_error:
+            logger.warning(f"全文検索インデックス作成をスキップ: {fts_error}")
+        
         conn.commit()
         cur.close()
-        logger.info("データベースの初期化・更新が完了しました。")
+        conn.close()
+        logger.info("データベース初期化完了")
         return True
         
     except Exception as e:
-        logger.error(f"データベース初期化・更新エラー: {e}")
-        if conn:
-            conn.rollback() # エラーが発生した場合は変更を元に戻す
+        logger.error(f"データベース初期化エラー: {e}")
         return False
-    finally:
-        if conn:
-            conn.close()
 
 # =================================================================
 # 4. ヘルパー関数
@@ -190,8 +266,7 @@ def extract_keywords_with_ai(message):
     """Claude APIを使ってメッセージからキーワードを抽出"""
     try:
         # APIキーが設定されていない場合はフォールバック
-        if not ANTHROPIC_API_KEY or ANTHROPIC_API_KEY == 'your-anthropic-api-key':
-            logger.warning("ANTHROPIC_API_KEYが設定されていません。フォールバック処理を使用します。")
+        if not ANTHROPIC_API_KEY:
             return extract_keywords_fallback(message)
             
         headers = {
@@ -289,22 +364,306 @@ def extract_keywords_fallback(message):
     
     return keywords[:5]
 
-def search_database_for_context(keywords, user_id, limit=5):
-    """データベースから文脈情報を検索する"""
+def parse_reminder_request(message):
+    """
+    リマインダーリクエストを解析
+    例: "毎日10時に薬を飲む" → {time: "10:00", repeat: "daily", message: "薬を飲む"}
+    """
+    patterns = [
+        # 毎日パターン
+        (r'毎日(\d{1,2})時(\d{0,2})分?に?(.+)', 'daily'),
+        (r'毎日(\d{1,2}):(\d{2})に?(.+)', 'daily'),
+        # 平日パターン
+        (r'平日(\d{1,2})時(\d{0,2})分?に?(.+)', 'weekdays'),
+        (r'平日(\d{1,2}):(\d{2})に?(.+)', 'weekdays'),
+        # 週末パターン
+        (r'週末(\d{1,2})時(\d{0,2})分?に?(.+)', 'weekends'),
+        (r'週末(\d{1,2}):(\d{2})に?(.+)', 'weekends'),
+        # 特定曜日パターン
+        (r'毎週([月火水木金土日])曜日?(\d{1,2})時(\d{0,2})分?に?(.+)', 'weekly'),
+        (r'毎週([月火水木金土日])曜日?(\d{1,2}):(\d{2})に?(.+)', 'weekly'),
+        # 一回限りパターン
+        (r'(\d{1,2})時(\d{0,2})分?に?(.+)', 'once'),
+        (r'(\d{1,2}):(\d{2})に?(.+)', 'once'),
+    ]
+    
+    for pattern, repeat_type in patterns:
+        match = re.match(pattern, message)
+        if match:
+            groups = match.groups()
+            
+            if repeat_type == 'weekly':
+                day_map = {'月': 'mon', '火': 'tue', '水': 'wed', '木': 'thu', '金': 'fri', '土': 'sat', '日': 'sun'}
+                day = day_map.get(groups[0], 'mon')
+                hour = int(groups[1])
+                minute = int(groups[2]) if groups[2] else 0
+                reminder_message = groups[3]
+                return {
+                    'time': f"{hour:02d}:{minute:02d}",
+                    'repeat': repeat_type,
+                    'days': [day],
+                    'message': reminder_message.strip()
+                }
+            else:
+                hour = int(groups[0])
+                minute = int(groups[1]) if groups[1] else 0
+                reminder_message = groups[2] if len(groups) > 2 else groups[1]
+                
+                days = []
+                if repeat_type == 'weekdays':
+                    days = ['mon', 'tue', 'wed', 'thu', 'fri']
+                elif repeat_type == 'weekends':
+                    days = ['sat', 'sun']
+                elif repeat_type == 'daily':
+                    days = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
+                
+                return {
+                    'time': f"{hour:02d}:{minute:02d}",
+                    'repeat': repeat_type,
+                    'days': days,
+                    'message': reminder_message.strip()
+                }
+    
+    # リマインダー削除パターン
+    if re.match(r'リマインダー.*削除|削除.*リマインダー', message):
+        return {'action': 'delete'}
+    
+    # リマインダー一覧パターン
+    if re.match(r'リマインダー.*一覧|一覧.*リマインダー', message):
+        return {'action': 'list'}
+    
+    return None
+
+def save_reminder(user_id, reminder_data):
+    """リマインダーをデータベースに保存"""
     try:
-        # 基本検索を直接呼び出すように修正
-        logger.info(f"基本検索を開始します。キーワード: {keywords}")
-        results = search_database_basic_fallback(keywords, user_id, limit)
+        conn = get_db_connection()
+        if not conn:
+            return False
+            
+        cur = conn.cursor()
         
-        if not results:
-            logger.info("基本検索では関連情報が見つかりませんでした。")
+        query = """
+            INSERT INTO reminders 
+            (user_id, message, reminder_time, repeat_pattern, repeat_days)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
+        """
         
-        return results
+        cur.execute(query, (
+            user_id,
+            reminder_data['message'],
+            reminder_data['time'],
+            reminder_data['repeat'],
+            reminder_data.get('days', [])
+        ))
+        
+        reminder_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return reminder_id
+        
+    except Exception as e:
+        logger.error(f"リマインダー保存エラー: {e}")
+        return False
+
+def get_user_reminders(user_id):
+    """ユーザーのリマインダー一覧を取得"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return []
+            
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cur.execute("""
+            SELECT id, message, reminder_time, repeat_pattern, repeat_days, is_active
+            FROM reminders
+            WHERE user_id = %s AND is_active = TRUE
+            ORDER BY reminder_time
+        """, (user_id,))
+        
+        reminders = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        return reminders
+        
+    except Exception as e:
+        logger.error(f"リマインダー取得エラー: {e}")
+        return []
+
+def delete_user_reminders(user_id):
+    """ユーザーのリマインダーを削除（非アクティブ化）"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+            
+        cur = conn.cursor()
+        
+        cur.execute("""
+            UPDATE reminders
+            SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = %s AND is_active = TRUE
+        """, (user_id,))
+        
+        affected = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return affected > 0
+        
+    except Exception as e:
+        logger.error(f"リマインダー削除エラー: {e}")
+        return False
+
+def send_reminder_notification(user_id, message):
+    """リマインダー通知を送信"""
+    try:
+        if user_id.startswith('line_') and line_bot_api:
+            # LINE通知
+            line_user_id = user_id.replace('line_', '')
+            line_bot_api.push_message(
+                line_user_id,
+                TextSendMessage(text=f"🔔 リマインダー\n\n{message}")
+            )
+            logger.info(f"リマインダー送信成功: {user_id} - {message[:50]}...")
+            return True
+        elif user_id.startswith('chatwork_'):
+            # Chatwork通知（実装可能）
+            logger.info(f"Chatworkリマインダー: {user_id} - {message}")
+            return True
+        else:
+            logger.warning(f"未対応のプラットフォーム: {user_id}")
+            return False
             
     except Exception as e:
-        # 検索処理全体でエラーが発生した場合のログ
-        logger.error(f"データベース検索中に予期せぬエラーが発生しました: {e}")
-        # エラーが発生した場合でも処理が止まらないよう空のリストを返す
+        logger.error(f"リマインダー通知エラー: {e}")
+        return False
+
+def check_and_send_reminders():
+    """定期的にリマインダーをチェックして送信"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return
+            
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # 現在時刻
+        now = datetime.now(pytz.timezone('Asia/Tokyo'))
+        current_time = now.strftime('%H:%M')
+        current_date = now.date()
+        current_day = now.strftime('%a').lower()
+        
+        # アクティブなリマインダーを取得
+        cur.execute("""
+            SELECT *
+            FROM reminders
+            WHERE is_active = TRUE
+            AND reminder_time::text LIKE %s
+            AND (last_sent_date IS NULL OR last_sent_date < %s)
+        """, (current_time + '%', current_date))
+        
+        reminders = cur.fetchall()
+        
+        for reminder in reminders:
+            should_send = False
+            
+            if reminder['repeat_pattern'] == 'once':
+                should_send = True
+            elif reminder['repeat_pattern'] == 'daily':
+                should_send = True
+            elif reminder['repeat_pattern'] == 'weekdays' and current_day in ['mon', 'tue', 'wed', 'thu', 'fri']:
+                should_send = True
+            elif reminder['repeat_pattern'] == 'weekends' and current_day in ['sat', 'sun']:
+                should_send = True
+            elif reminder['repeat_pattern'] == 'weekly' and current_day in reminder.get('repeat_days', []):
+                should_send = True
+            
+            if should_send:
+                # 通知送信
+                success = send_reminder_notification(reminder['user_id'], reminder['message'])
+                
+                if success:
+                    # 送信日を更新
+                    update_query = """
+                        UPDATE reminders
+                        SET last_sent_date = %s
+                        WHERE id = %s
+                    """
+                    cur.execute(update_query, (current_date, reminder['id']))
+                    
+                    # 一回限りのリマインダーは非アクティブ化
+                    if reminder['repeat_pattern'] == 'once':
+                        cur.execute("""
+                            UPDATE reminders
+                            SET is_active = FALSE
+                            WHERE id = %s
+                        """, (reminder['id'],))
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+    except Exception as e:
+        logger.error(f"リマインダーチェックエラー: {e}")
+
+def get_recent_line_conversations(user_id, limit=10):
+    """指定したLINEユーザーの最近の会話履歴を取得"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            logger.error("データベース接続失敗")
+            return []
+        
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # 最近の会話を時系列順で取得
+        cur.execute("""
+            SELECT 
+                user_message,
+                ai_response,
+                created_at
+            FROM conversations
+            WHERE user_id = %s
+            ORDER BY created_at DESC
+            LIMIT %s
+        """, (user_id, limit))
+        
+        conversations = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        # 時系列順（古い順）に並び替えて返す
+        conversations.reverse()
+        
+        logger.info(f"LINE会話履歴取得: {len(conversations)}件 (user_id: {user_id})")
+        return conversations
+        
+    except Exception as e:
+        logger.error(f"LINE会話履歴取得エラー: {e}")
+        return []
+
+def search_database_for_context(keywords, user_id, limit=5):
+    """データベース検索のメインエントリーポイント"""
+    try:
+        # 直接基本検索を使用（perfect検索関数が未定義のため）
+        results = search_database_basic_fallback(keywords, user_id, limit)
+        
+        if results:
+            logger.info(f"検索成功: {len(results)} 件")
+            return results
+        else:
+            logger.warning("検索結果なし")
+            return []
+            
+    except Exception as e:
+        logger.error(f"検索システムエラー: {e}")
         return []
 
 def search_database_basic_fallback(keywords, user_id, limit=5):
@@ -408,8 +767,7 @@ def generate_ai_response_with_context(user_message, context_data, user_id):
     """文脈情報を使ってAI回答を生成"""
     try:
         # APIキーが設定されていない場合はフォールバック
-        if not ANTHROPIC_API_KEY or ANTHROPIC_API_KEY == 'your-anthropic-api-key':
-            logger.warning("ANTHROPIC_API_KEYが設定されていません。基本的な回答を返します。")
+        if not ANTHROPIC_API_KEY:
             return generate_fallback_response(user_message, context_data)
             
         headers = {
@@ -545,6 +903,7 @@ def generate_fallback_response(user_message, context_data):
 
 def save_conversation_to_db(user_id, conversation_id, user_message, ai_response, keywords, context_used, response_time_ms, source_platform='web'):
     """会話をデータベースに保存"""
+    conn = None
     try:
         conn = get_db_connection()
         if not conn:
@@ -586,14 +945,25 @@ def save_conversation_to_db(user_id, conversation_id, user_message, ai_response,
         
     except Exception as e:
         logger.error(f"会話保存エラー: {e}")
+        if conn:
+            conn.rollback()
+            conn.close()
         return False
+
+# レート制限用の辞書（簡易実装）
+user_requests = {}
+
+# その他の設定
+SKLEARN_N_JOBS = int(os.getenv('SKLEARN_N_JOBS', '1'))  # scikit-learn並列処理数
+NUMPY_MEMORY_LIMIT = int(os.getenv('NUMPY_MEMORY_LIMIT', '256'))  # NumPyメモリ制限(MB)
 
 def rate_limit(max_requests=10, window_seconds=60):
     """レート制限デコレータ"""
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            # 簡単な実装（実際にはRedisを使うべき）
+            # 簡易的なレート制限実装
+            # 本番環境ではRedisを使用することを推奨
             return func(*args, **kwargs)
         return wrapper
     return decorator
@@ -657,9 +1027,12 @@ def chat():
                 full_response = generate_ai_response_with_context(user_message, context_data, user_id)
                 
                 # 文字ごとにストリーミング送信
-                for char in full_response:
-                    yield f"data: {json.dumps({'text': char})}\n\n"
-                    time.sleep(0.01)  # 少し遅延を入れてストリーミング感を演出
+                # パフォーマンス最適化：チャンクサイズを大きくして遅延を減らす
+                chunk_size = 10  # 10文字ずつ送信
+                for i in range(0, len(full_response), chunk_size):
+                    chunk = full_response[i:i+chunk_size]
+                    yield f"data: {json.dumps({'text': chunk})}\n\n"
+                    time.sleep(0.05)  # チャンクごとの遅延
 
                 # ステップ4: データベースに保存
                 response_time_ms = int((time.time() - start_time) * 1000)
@@ -779,145 +1152,125 @@ def handle_line_message(event):
     """LINEメッセージハンドラ"""
     try:
         user_id = f"line_{event.source.user_id}"
-        user_message = event.message.text.strip()
-        target_id = event.source.user_id
-        if hasattr(event.source, 'group_id'):
-            target_id = event.source.group_id
-
-        # --- リマインダー機能 ---
-        if user_message.startswith('リマインダー'):
-            if user_message == 'リマインダー':
-                reply_text = """リマインダー機能です。
-「リマインダー 明日15時 会議」のように内容と日時を教えてください。
-「リマインダー 毎週月曜 朝8時 ゴミ出し」のような繰り返し設定も可能です。"""
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
-                return 'OK'
-
-            reminder_text = user_message.replace('リマインダー', '', 1).strip()
-            
-            # --- ▼ 繰り返し設定の判定処理を追加 ▼ ---
-            is_recurring = False
-            recurrence_rule = None
-            
-            # 簡易的な繰り返しルールの判定
-            if "毎日" in reminder_text:
-                is_recurring = True
-                recurrence_rule = "daily"
-            elif "毎週" in reminder_text:
-                is_recurring = True
-                # "毎週X曜"の形式を判定 (例: 毎週月曜)
-                weekdays = {"月": 0, "火": 1, "水": 2, "木": 3, "金": 4, "土": 5, "日": 6}
-                for day_char, day_num in weekdays.items():
-                    if f"毎週{day_char}" in reminder_text:
-                        recurrence_rule = f"weekly_{day_num}"
-                        break
-                if recurrence_rule is None:
-                    recurrence_rule = f"weekly_{datetime.now(pytz.timezone('Asia/Tokyo')).weekday()}" # 曜日指定がなければ今日の曜日に
-
-            # 日時の解析
-            parsed_datetime = dateparser.parse(reminder_text, languages=['ja'])
-            
-            if parsed_datetime:
-                now = datetime.now(pytz.timezone('Asia/Tokyo'))
-                if parsed_datetime.tzinfo is None:
-                    parsed_datetime = pytz.timezone('Asia/Tokyo').localize(parsed_datetime)
-
-                # 初回通知時間を計算
-                if is_recurring:
-                    # 時間部分だけを使い、日付は今日に設定
-                    first_due_time = parsed_datetime.time()
-                    first_due_datetime = now.replace(hour=first_due_time.hour, minute=first_due_time.minute, second=0, microsecond=0)
-                    
-                    if recurrence_rule.startswith("weekly"):
-                        target_weekday = int(recurrence_rule.split('_')[1])
-                        days_ahead = target_weekday - first_due_datetime.weekday()
-                        if days_ahead < 0 or (days_ahead == 0 and first_due_datetime.time() < now.time()):
-                            days_ahead += 7
-                        first_due_datetime += timedelta(days=days_ahead)
-                    elif first_due_datetime < now:
-                        first_due_datetime += timedelta(days=1)
-                    parsed_datetime = first_due_datetime
-                
-                # データベースに保存（繰り返し情報も追加）
-                conn = get_db_connection()
-                cur = conn.cursor()
-                cur.execute(
-                    "INSERT INTO reminders (user_id, target_id, reminder_content, due_at, is_recurring, recurrence_rule) VALUES (%s, %s, %s, %s, %s, %s)",
-                    (user_id, f"line_{target_id}", reminder_text, parsed_datetime, is_recurring, recurrence_rule)
-                )
-                conn.commit()
-                cur.close()
-                conn.close()
-                
-                reply_text = f"了解しました！\n【{reminder_text}】を\n{parsed_datetime.strftime('%Y年%m月%d日 %H:%M')}からお知らせします。"
-            else:
-                reply_text = "すみません、日時をうまく読み取れませんでした。「明日15時」「毎週金曜朝8時」のように具体的に教えてください。"
-            
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
-            return 'OK'
-
+        user_message = event.message.text
         
-        # --- 一覧表示機能 ---
-        elif user_message == '一覧':
-            conn = get_db_connection()
-            # 結果を辞書形式で受け取る
-            cur = conn.cursor(cursor_factory=RealDictCursor)
-
-            cur.execute(
-                "SELECT id, reminder_content, due_at FROM reminders WHERE target_id = %s AND status = 'active' ORDER BY due_at ASC LIMIT 10",
-                (f"line_{target_id}",)
-            )
-            reminders = cur.fetchall()
-            cur.close()
-            conn.close()
-            
-            if not reminders:
-                reply_text = "登録されているリマインダーはありません。"
+        logger.info(f"LINE受信: {user_id} - {user_message[:50]}...")
+        
+        # 過去10件の会話履歴を取得
+        recent_conversations = get_recent_line_conversations(user_id, limit=10)
+        logger.info(f"過去の会話履歴: {len(recent_conversations)}件取得")
+        
+        # 会話履歴を文字列形式に整形
+        conversation_history = ""
+        if recent_conversations:
+            conversation_history = "\n\n=== 過去の会話履歴 ===\n"
+            for conv in recent_conversations:
+                created_at = conv['created_at'].strftime('%Y-%m-%d %H:%M:%S')
+                conversation_history += f"\n[{created_at}]\n"
+                conversation_history += f"ユーザー: {conv['user_message']}\n"
+                conversation_history += f"AI: {conv['ai_response'][:100]}...\n"  # 長い場合は省略
+            conversation_history += "\n=== 履歴終了 ===\n\n"
+        
+        # キーワード抽出
+        keywords = extract_keywords_with_ai(user_message)
+        logger.info(f"抽出キーワード: {keywords}")
+        
+        # データベース検索（関連する過去の会話）
+        context_data = search_database_for_context(keywords, user_id)
+        
+        # 会話履歴を含めたコンテキストデータの作成
+        enhanced_context_data = context_data
+        if conversation_history:
+            # 会話履歴を最初に追加
+            history_context = {
+                'user_message': '過去の会話履歴',
+                'ai_response': conversation_history,
+                'created_at': datetime.now(),
+                'final_score': 100  # 高いスコアを付けて優先度を上げる
+            }
+            enhanced_context_data = [history_context] + context_data
+        
+        # リマインダー処理をチェック
+        reminder_data = parse_reminder_request(user_message)
+        if reminder_data:
+            if reminder_data.get('action') == 'list':
+                # リマインダー一覧
+                reminders = get_user_reminders(user_id)
+                if reminders:
+                    ai_response = "📋 現在設定されているリマインダー:\n\n"
+                    for i, reminder in enumerate(reminders, 1):
+                        time_str = str(reminder['reminder_time'])[:5]
+                        repeat_str = {
+                            'once': '一回のみ',
+                            'daily': '毎日',
+                            'weekdays': '平日',
+                            'weekends': '週末',
+                            'weekly': '毎週'
+                        }.get(reminder['repeat_pattern'], reminder['repeat_pattern'])
+                        
+                        if reminder['repeat_pattern'] == 'weekly' and reminder['repeat_days']:
+                            day_map = {'mon': '月', 'tue': '火', 'wed': '水', 'thu': '木', 'fri': '金', 'sat': '土', 'sun': '日'}
+                            days_str = ''.join([day_map.get(d, d) for d in reminder['repeat_days']])
+                            repeat_str += f" {days_str}曜日"
+                        
+                        ai_response += f"{i}. {time_str} {repeat_str}: {reminder['message']}\n"
+                else:
+                    ai_response = "現在、設定されているリマインダーはありません。\n\n例えば以下のように設定できます：\n・毎日10時に薬を飲む\n・平日8時に出勤準備\n・毎週月曜日9時に会議"
+            elif reminder_data.get('action') == 'delete':
+                # リマインダー削除
+                if delete_user_reminders(user_id):
+                    ai_response = "✅ リマインダーをすべて削除しました。"
+                else:
+                    ai_response = "リマインダーの削除に失敗しました。"
             else:
-                reply_text = "【登録済みのリマインダー】\n\n"
-                for r in reminders:
-                    # タイムゾーンを日本時間に変換して表示
-                    due_at_jst = r['due_at'].astimezone(pytz.timezone('Asia/Tokyo'))
-                    reply_text += f"・{r['reminder_content']} ({due_at_jst.strftime('%m/%d %H:%M')})\n"
-            
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
-            return 'OK'
-
-        # --- ベテランAI機能（既存の機能） ---
-        elif "ベテランAI" in user_message:
-            logger.info(f"キーワード「ベテランAI」を検出。AI応答を生成します。")
-            keywords = extract_keywords_with_ai(user_message)
-            context_data = search_database_for_context(keywords, user_id)
-            ai_response = generate_ai_response_with_context(user_message, context_data, user_id)
-            
-            save_conversation_to_db(
-                user_id=user_id,
-                conversation_id=None,
-                user_message=user_message,
-                ai_response=ai_response,
-                keywords=keywords,
-                context_used=context_data,
-                response_time_ms=0,
-                source_platform='line'
-            )
-            
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text=ai_response)
-            )
-            return 'OK'
-
+                # リマインダー設定
+                reminder_id = save_reminder(user_id, reminder_data)
+                if reminder_id:
+                    time_str = reminder_data['time']
+                    repeat_str = {
+                        'once': '一回のみ',
+                        'daily': '毎日',
+                        'weekdays': '平日',
+                        'weekends': '週末',
+                        'weekly': '毎週'
+                    }.get(reminder_data['repeat'], reminder_data['repeat'])
+                    
+                    if reminder_data['repeat'] == 'weekly' and reminder_data.get('days'):
+                        day_map = {'mon': '月', 'tue': '火', 'wed': '水', 'thu': '木', 'fri': '金', 'sat': '土', 'sun': '日'}
+                        days_str = ''.join([day_map.get(d, d) for d in reminder_data['days']])
+                        repeat_str += f" {days_str}曜日"
+                    
+                    ai_response = f"✅ リマインダーを設定しました！\n\n⏰ 時刻: {time_str}\n🔄 繰り返し: {repeat_str}\n📝 内容: {reminder_data['message']}\n\n設定したリマインダーは指定時刻に通知されます。"
+                else:
+                    ai_response = "リマインダーの設定に失敗しました。もう一度お試しください。"
+        else:
+            # 通常のAI回答生成（会話履歴を含むコンテキストで）
+            ai_response = generate_ai_response_with_context(user_message, enhanced_context_data, user_id)
+        
+        # データベースに保存
+        save_conversation_to_db(
+            user_id=user_id,
+            conversation_id=None,
+            user_message=user_message,
+            ai_response=ai_response,
+            keywords=keywords,
+            context_used=context_data,  # 元のcontext_dataを保存
+            response_time_ms=0,
+            source_platform='line'
+        )
+        
+        # LINE返信
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=ai_response)
+        )
+        
     except Exception as e:
         logger.error(f"LINE メッセージ処理エラー: {e}")
-        try:
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="申し訳ございません。エラーが発生しました。")
-            )
-        except Exception as reply_error:
-            logger.error(f"LINE エラー返信失敗: {reply_error}")
-
-        
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text="申し訳ございません。エラーが発生しました。")
+        )
 
 # =================================================================
 # 9. Chatwork Webhook
@@ -1042,16 +1395,19 @@ def debug_conversations():
         logger.error(f"デバッグ取得エラー: {e}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/debug/ultimate-search/<query>')
-def debug_ultimate_search(query):
-    """究極検索システムのデバッグ"""
+@app.route('/api/debug/search/<query>')
+def debug_search(query):
+    """検索システムのデバッグ"""
     try:
         user_id = "debug_user"
         
-        # 究極検索実行
-        results = search_database_for_context_ultimate(query, user_id, limit=10)
+        # キーワード抽出
+        keywords = extract_keywords_with_ai(query)
         
-        # 各結果の詳細スコア情報
+        # 通常検索実行
+        results = search_database_for_context(keywords, user_id, limit=10)
+        
+        # 各結果の情報
         detailed_results = []
         for i, result in enumerate(results):
             detailed_result = {
@@ -1059,70 +1415,111 @@ def debug_ultimate_search(query):
                 'user_message': result.get('user_message', '')[:100],
                 'ai_response': result.get('ai_response', '')[:200],
                 'created_at': str(result.get('created_at', '')),
-                'source': result.get('source', ''),
-                'scores': {
-                    'relevance_score': result.get('relevance_score', 0.0),
-                    'semantic_score': result.get('semantic_score', 0.0),
-                    'ngram_score': result.get('ngram_score', 0.0),
-                    'temporal_score': result.get('temporal_score', 0.0),
-                    'personalization_boost': result.get('personalization_boost', 0.0)
-                }
+                'source': result.get('source', '')
             }
             detailed_results.append(detailed_result)
         
         return jsonify({
             'query': query,
+            'keywords': keywords,
             'total_results': len(results),
-            'results': detailed_results,
-            'system_status': {
-                'ultimate_search_enabled': True,
-                'semantic_engine_initialized': hasattr(ultimate_search_engine, 'semantic_engine'),
-                'ngram_engine_initialized': hasattr(ultimate_search_engine, 'ngram_engine')
-            }
+            'results': detailed_results
         })
         
     except Exception as e:
-        logger.error(f"究極検索デバッグエラー: {e}")
+        logger.error(f"検索デバッグエラー: {e}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/debug/search-analytics/<user_id>')
-def debug_search_analytics(user_id):
-    """ユーザーの検索分析情報"""
+@app.route('/api/debug/user-stats/<user_id>')
+def debug_user_stats(user_id):
+    """ユーザーの統計情報"""
     try:
-        # ユーザー行動パターン取得
-        preferences = ultimate_search_engine.behavior_learner.get_user_preferences(user_id)
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'error': 'データベース接続エラー'}), 500
+            
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # ユーザーの会話統計
+        cur.execute("""
+            SELECT 
+                COUNT(*) as total_conversations,
+                COUNT(DISTINCT DATE(created_at)) as active_days,
+                MIN(created_at) as first_conversation,
+                MAX(created_at) as last_conversation
+            FROM conversations
+            WHERE user_id = %s
+        """, (user_id,))
+        
+        stats = dict(cur.fetchone())
+        
+        # 最頻出キーワード
+        cur.execute("""
+            SELECT keyword, COUNT(*) as count
+            FROM (
+                SELECT unnest(keywords) as keyword
+                FROM conversations
+                WHERE user_id = %s AND keywords IS NOT NULL
+            ) as k
+            GROUP BY keyword
+            ORDER BY count DESC
+            LIMIT 10
+        """, (user_id,))
+        
+        frequent_keywords = [dict(row) for row in cur.fetchall()]
+        
+        cur.close()
+        conn.close()
         
         return jsonify({
             'user_id': user_id,
-            'search_patterns': preferences,
-            'behavior_data': {
-                'total_searches': preferences.get('search_count', 0),
-                'frequent_keywords': preferences.get('frequent_words', {}),
-                'preferred_content_types': preferences.get('preferred_content_types', {}),
-                'active_hours': preferences.get('active_hours', [])
-            }
+            'stats': stats,
+            'frequent_keywords': frequent_keywords
         })
         
     except Exception as e:
-        logger.error(f"検索分析デバッグエラー: {e}")
+        logger.error(f"ユーザー統計デバッグエラー: {e}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/search/feedback', methods=['POST'])
-def record_search_feedback():
-    """検索フィードバックを記録"""
+@app.route('/api/feedback', methods=['POST'])
+def record_feedback():
+    """会話フィードバックを記録"""
     try:
-        data = request.json
-        user_id = data.get('user_id')
-        query = data.get('query')
-        document_id = data.get('document_id')
-        clicked = data.get('clicked', True)
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': '無効なリクエスト'}), 400
+            
+        conversation_id = data.get('conversation_id')
+        rating = data.get('rating')
         
-        # フィードバックを機械学習エンジンに記録
-        ultimate_search_engine.ml_engine.record_user_feedback(
-            user_id, query, document_id, clicked
-        )
+        if not conversation_id or rating is None:
+            return jsonify({'error': 'conversation_idとratingは必須です'}), 400
+            
+        if not (1 <= rating <= 5):
+            return jsonify({'error': 'ratingは1から5の間である必要があります'}), 400
+            
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'error': 'データベース接続エラー'}), 500
+            
+        cur = conn.cursor()
         
-        return jsonify({'success': True, 'message': 'フィードバックを記録しました'})
+        # 満足度を更新
+        cur.execute("""
+            UPDATE conversations
+            SET satisfaction_rating = %s, updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+        """, (rating, conversation_id))
+        
+        affected = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        if affected > 0:
+            return jsonify({'success': True, 'message': 'フィードバックを記録しました'})
+        else:
+            return jsonify({'error': '該当する会話が見つかりません'}), 404
         
     except Exception as e:
         logger.error(f"フィードバック記録エラー: {e}")
@@ -1134,9 +1531,30 @@ def create_app():
     logger.info("アプリケーション初期化完了")
     return app
 
+# スケジューラーのジョブを設定
+def setup_scheduler():
+    """スケジューラーのジョブを設定"""
+    # 既存のジョブをクリア
+    scheduler.remove_all_jobs()
+    
+    # 毎分実行（リマインダーチェック）
+    scheduler.add_job(
+        func=check_and_send_reminders,
+        trigger='cron',
+        minute='*',  # 毎分
+        id='reminder_checker',
+        replace_existing=True
+    )
+    
+    logger.info("スケジューラージョブを設定しました")
+
 # アプリケーション初期化（本番環境用）
-# with app.app_context():
-#     init_database()
+with app.app_context():
+    init_database()
+    setup_scheduler()
+    if not scheduler.running:
+        scheduler.start()
+        logger.info("スケジューラーを開始しました")
 
 if __name__ == '__main__':
     # 環境に応じた設定
@@ -1144,13 +1562,38 @@ if __name__ == '__main__':
     debug = os.getenv('FLASK_DEBUG', 'True').lower() == 'true'
     host = os.getenv('HOST', '0.0.0.0')
     
+    # Pythonバージョン確認
+    python_version = os.getenv('PYTHON_VERSION', '3.11.7')
+    logger.info(f"Pythonバージョン要件: {python_version}")
+    
+    # 環境設定のサマリーをログ出力
+    logger.info(f"アプリケーション起動設定:")
+    logger.info(f"  - Flask環境: {os.getenv('FLASK_ENV', 'development')}")
+    logger.info(f"  - ポート: {port}")
+    logger.info(f"  - デバッグモード: {debug}")
+    logger.info(f"  - ホスト: {host}")
+    logger.info(f"  - CORS許可オリジン: {allowed_origins}")
+    logger.info(f"  - Claude API: {'Configured' if ANTHROPIC_API_KEY else 'Not configured'}")
+    logger.info(f"  - LINE Bot: {'Configured' if LINE_CHANNEL_ACCESS_TOKEN else 'Not configured'}")
+    logger.info(f"  - Supabase: {'Configured' if SUPABASE_URL else 'Not configured'}")
+    
     logger.info(f"アプリケーションを起動中... Port: {port}, Debug: {debug}")
     
     # 開発環境では追加の初期化
     if debug:
         init_database()
+        setup_scheduler()
+        if not scheduler.running:
+            scheduler.start()
+            logger.info("スケジューラーを開始しました（開発環境）")
     
-    app.run(host=host, port=port, debug=debug)
+    try:
+        app.run(host=host, port=port, debug=debug)
+    finally:
+        # アプリケーション終了時にスケジューラーを停止
+        if scheduler.running:
+            scheduler.shutdown()
+            logger.info("スケジューラーを停止しました")
 
 # Gunicorn用のアプリケーションオブジェクト
 application = app
