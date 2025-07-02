@@ -34,3 +34,5 @@ anthropic==0.20.0
 
 dateparser
 pytz
+
+APScheduler==3.10.4
